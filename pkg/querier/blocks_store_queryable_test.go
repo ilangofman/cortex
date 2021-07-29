@@ -15,6 +15,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/storage"
@@ -28,6 +29,7 @@ import (
 	"github.com/weaveworks/common/user"
 	"google.golang.org/grpc"
 
+	"github.com/cortexproject/cortex/pkg/chunk/purger"
 	"github.com/cortexproject/cortex/pkg/storage/tsdb/bucketindex"
 	"github.com/cortexproject/cortex/pkg/storegateway/storegatewaypb"
 	"github.com/cortexproject/cortex/pkg/util"
@@ -44,14 +46,16 @@ func TestBlocksStoreQuerier_Select(t *testing.T) {
 	)
 
 	var (
-		block1           = ulid.MustNew(1, nil)
-		block2           = ulid.MustNew(2, nil)
-		block3           = ulid.MustNew(3, nil)
-		block4           = ulid.MustNew(4, nil)
-		metricNameLabel  = labels.Label{Name: labels.MetricName, Value: metricName}
-		series1Label     = labels.Label{Name: "series", Value: "1"}
-		series2Label     = labels.Label{Name: "series", Value: "2"}
-		noOpQueryLimiter = limiter.NewQueryLimiter(0)
+		block1            = ulid.MustNew(1, nil)
+		block2            = ulid.MustNew(2, nil)
+		block3            = ulid.MustNew(3, nil)
+		block4            = ulid.MustNew(4, nil)
+		metricNameLabel   = labels.Label{Name: labels.MetricName, Value: metricName}
+		series1Label      = labels.Label{Name: "series", Value: "1"}
+		series2Label      = labels.Label{Name: "series", Value: "2"}
+		noOpQueryLimiter  = limiter.NewQueryLimiter(0)
+		metricNameMatcher = labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, metricName)
+		seriesMatcher2    = labels.MustNewMatcher(labels.MatchEqual, "series", "2")
 	)
 
 	type valueResult struct {
@@ -73,6 +77,7 @@ func TestBlocksStoreQuerier_Select(t *testing.T) {
 		expectedSeries    []seriesResult
 		expectedErr       error
 		expectedMetrics   string
+		tombstoneSet      *purger.TombstonesSet
 	}{
 		"no block in the storage matching the query time range": {
 			finderResult: nil,
@@ -510,6 +515,172 @@ func TestBlocksStoreQuerier_Select(t *testing.T) {
 			queryLimiter: limiter.NewQueryLimiter(1),
 			expectedErr:  validation.LimitError(fmt.Sprintf("The query hit the max number of series limit (limit: %d)", 1)),
 		},
+		"single tombstones exist and should filter the entire returned series": {
+			finderResult: bucketindex.Blocks{
+				{ID: block1},
+				{ID: block2},
+			},
+			storeSetResponses: []interface{}{
+				map[BlocksStoreClient][]ulid.ULID{
+					&storeGatewayClientMock{remoteAddr: "1.1.1.1", mockedSeriesResponses: []*storepb.SeriesResponse{
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+1, 2),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+2, 2),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+3, 2),
+						mockHintsResponse(block1),
+					}}: {block1},
+					&storeGatewayClientMock{remoteAddr: "2.2.2.2", mockedSeriesResponses: []*storepb.SeriesResponse{
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT, 1),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+1, 2),
+						mockHintsResponse(block2),
+					}}: {block2},
+				},
+			},
+			limits:       &blocksStoreLimitsMock{},
+			queryLimiter: noOpQueryLimiter,
+			expectedSeries: []seriesResult{
+				{
+					lbls:   labels.New(metricNameLabel),
+					values: []valueResult(nil),
+				},
+			},
+			tombstoneSet: purger.NewTombstoneSet([]purger.DeleteRequest{
+				{StartTime: model.Time(minT), EndTime: model.Time(minT + 3), Matchers: [][]*labels.Matcher{{metricNameMatcher}}}},
+				model.Time(minT), model.Time(minT+3)),
+		},
+		"single tombstones exist and should filter part of returned series": {
+			finderResult: bucketindex.Blocks{
+				{ID: block1},
+				{ID: block2},
+			},
+			storeSetResponses: []interface{}{
+				map[BlocksStoreClient][]ulid.ULID{
+					&storeGatewayClientMock{remoteAddr: "1.1.1.1", mockedSeriesResponses: []*storepb.SeriesResponse{
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+1, 2),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+2, 3),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+3, 4),
+						mockHintsResponse(block1),
+					}}: {block1},
+					&storeGatewayClientMock{remoteAddr: "2.2.2.2", mockedSeriesResponses: []*storepb.SeriesResponse{
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT, 1),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+1, 2),
+						mockHintsResponse(block2),
+					}}: {block2},
+				},
+			},
+			limits:       &blocksStoreLimitsMock{},
+			queryLimiter: noOpQueryLimiter,
+			expectedSeries: []seriesResult{
+				{
+					lbls: labels.New(metricNameLabel),
+					values: []valueResult{
+						{t: minT + 2, v: 3},
+						{t: minT + 3, v: 4},
+					},
+				},
+			},
+			tombstoneSet: purger.NewTombstoneSet([]purger.DeleteRequest{
+				{StartTime: model.Time(minT), EndTime: model.Time(minT + 1), Matchers: [][]*labels.Matcher{{metricNameMatcher}}}},
+				model.Time(minT), model.Time(minT+1)),
+		},
+		"multiple tombstones exist for the same series and should filter part of returned series": {
+			finderResult: bucketindex.Blocks{
+				{ID: block1},
+				{ID: block2},
+			},
+			storeSetResponses: []interface{}{
+				map[BlocksStoreClient][]ulid.ULID{
+					&storeGatewayClientMock{remoteAddr: "1.1.1.1", mockedSeriesResponses: []*storepb.SeriesResponse{
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+1, 2),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+2, 3),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+3, 4),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+7, 2),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+9, 2),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+10, 3),
+
+						mockHintsResponse(block1),
+					}}: {block1},
+					&storeGatewayClientMock{remoteAddr: "2.2.2.2", mockedSeriesResponses: []*storepb.SeriesResponse{
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT, 1),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+1, 2),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+7, 2),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+9, 2),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+10, 3),
+
+						mockHintsResponse(block2),
+					}}: {block2},
+				},
+			},
+			limits:       &blocksStoreLimitsMock{},
+			queryLimiter: noOpQueryLimiter,
+			expectedSeries: []seriesResult{
+				{
+					lbls: labels.New(metricNameLabel),
+					values: []valueResult{
+						{t: minT + 2, v: 3},
+						{t: minT + 3, v: 4},
+						{t: minT + 10, v: 3},
+					},
+				},
+			},
+			tombstoneSet: purger.NewTombstoneSet([]purger.DeleteRequest{
+				{StartTime: model.Time(minT), EndTime: model.Time(minT + 1), Matchers: [][]*labels.Matcher{{metricNameMatcher}}},
+				{StartTime: model.Time(minT + 6), EndTime: model.Time(minT + 9), Matchers: [][]*labels.Matcher{{metricNameMatcher}}}},
+				model.Time(minT), model.Time(minT+9)),
+		},
+		"multiple tombstones exist for the different series and should filter part of returned series": {
+			finderResult: bucketindex.Blocks{
+				{ID: block1},
+				{ID: block2},
+			},
+			storeSetResponses: []interface{}{
+				map[BlocksStoreClient][]ulid.ULID{
+					&storeGatewayClientMock{remoteAddr: "1.1.1.1", mockedSeriesResponses: []*storepb.SeriesResponse{
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+1, 2),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+2, 3),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+3, 4),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+7, 2),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+9, 2),
+						mockSeriesResponse(labels.Labels{series2Label}, minT+10, 3),
+
+						mockHintsResponse(block1),
+					}}: {block1},
+					&storeGatewayClientMock{remoteAddr: "2.2.2.2", mockedSeriesResponses: []*storepb.SeriesResponse{
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT, 1),
+						mockSeriesResponse(labels.Labels{metricNameLabel}, minT+1, 2),
+						mockSeriesResponse(labels.Labels{series2Label}, minT+1, 1),
+						mockSeriesResponse(labels.Labels{series2Label}, minT+7, 2),
+						mockSeriesResponse(labels.Labels{series2Label}, minT+9, 2),
+						mockSeriesResponse(labels.Labels{series2Label}, minT+10, 3),
+
+						mockHintsResponse(block2),
+					}}: {block2},
+				},
+			},
+			limits:       &blocksStoreLimitsMock{},
+			queryLimiter: noOpQueryLimiter,
+			expectedSeries: []seriesResult{
+				{
+					lbls: labels.New(metricNameLabel),
+					values: []valueResult{
+						{t: minT + 2, v: 3},
+						{t: minT + 3, v: 4},
+						{t: minT + 7, v: 2},
+						{t: minT + 9, v: 2},
+					},
+				},
+				{
+					lbls: labels.New(series2Label),
+					values: []valueResult{
+						{t: minT + 1, v: 1},
+						{t: minT + 10, v: 3},
+					},
+				},
+			},
+			tombstoneSet: purger.NewTombstoneSet([]purger.DeleteRequest{
+				{StartTime: model.Time(minT), EndTime: model.Time(minT + 1), Matchers: [][]*labels.Matcher{{metricNameMatcher}}},
+				{StartTime: model.Time(minT + 6), EndTime: model.Time(minT + 9), Matchers: [][]*labels.Matcher{{seriesMatcher2}}}},
+				model.Time(minT), model.Time(minT+9)),
+		},
 	}
 
 	for testName, testData := range tests {
@@ -519,6 +690,7 @@ func TestBlocksStoreQuerier_Select(t *testing.T) {
 			stores := &blocksStoreSetMock{mockedResponses: testData.storeSetResponses}
 			finder := &blocksFinderMock{}
 			finder.On("GetBlocks", mock.Anything, "user-1", minT, maxT).Return(testData.finderResult, map[ulid.ULID]*bucketindex.BlockDeletionMark(nil), testData.finderErr)
+			finder.On("GetTombstones", mock.Anything, "user-1", mock.Anything, mock.Anything).Return(testData.tombstoneSet, error(nil))
 
 			q := &blocksStoreQuerier{
 				ctx:         ctx,
@@ -997,6 +1169,7 @@ func TestBlocksStoreQuerier_Labels(t *testing.T) {
 				stores := &blocksStoreSetMock{mockedResponses: testData.storeSetResponses}
 				finder := &blocksFinderMock{}
 				finder.On("GetBlocks", mock.Anything, "user-1", minT, maxT).Return(testData.finderResult, map[ulid.ULID]*bucketindex.BlockDeletionMark(nil), testData.finderErr)
+				finder.On("GetTombstones", mock.Anything, "user-1", mock.Anything, mock.Anything).Return(purger.NewTombstoneSet(nil, 0, 0), error(nil))
 
 				q := &blocksStoreQuerier{
 					ctx:         ctx,
@@ -1093,6 +1266,7 @@ func TestBlocksStoreQuerier_SelectSortedShouldHonorQueryStoreAfter(t *testing.T)
 		t.Run(testName, func(t *testing.T) {
 			finder := &blocksFinderMock{}
 			finder.On("GetBlocks", mock.Anything, "user-1", mock.Anything, mock.Anything).Return(bucketindex.Blocks(nil), map[ulid.ULID]*bucketindex.BlockDeletionMark(nil), error(nil))
+			finder.On("GetTombstones", mock.Anything, "user-1", mock.Anything, mock.Anything).Return(purger.NewTombstoneSet(nil, 0, 0), error(nil))
 
 			q := &blocksStoreQuerier{
 				ctx:             context.Background(),
@@ -1159,6 +1333,7 @@ func TestBlocksStoreQuerier_PromQLExecution(t *testing.T) {
 		{ID: block1},
 		{ID: block2},
 	}, map[ulid.ULID]*bucketindex.BlockDeletionMark(nil), error(nil))
+	finder.On("GetTombstones", mock.Anything, "user-1", mock.Anything, mock.Anything).Return(purger.NewTombstoneSet(nil, 0, 0), error(nil))
 
 	// Mock the store to simulate each block is queried from a different store-gateway.
 	gateway1 := &storeGatewayClientMock{remoteAddr: "1.1.1.1", mockedSeriesResponses: []*storepb.SeriesResponse{
@@ -1282,6 +1457,11 @@ type blocksFinderMock struct {
 func (m *blocksFinderMock) GetBlocks(ctx context.Context, userID string, minT, maxT int64) (bucketindex.Blocks, map[ulid.ULID]*bucketindex.BlockDeletionMark, error) {
 	args := m.Called(ctx, userID, minT, maxT)
 	return args.Get(0).(bucketindex.Blocks), args.Get(1).(map[ulid.ULID]*bucketindex.BlockDeletionMark), args.Error(2)
+}
+
+func (m *blocksFinderMock) GetTombstones(ctx context.Context, userID string, minT, maxT int64) (*purger.TombstonesSet, error) {
+	args := m.Called(ctx, userID, minT, maxT)
+	return args.Get(0).(*purger.TombstonesSet), args.Error(1)
 }
 
 type storeGatewayClientMock struct {

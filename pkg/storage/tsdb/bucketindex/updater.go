@@ -250,10 +250,6 @@ func (w *Updater) updateBlockDeletionMarkIndexEntry(ctx context.Context, id ulid
 	return BlockDeletionMarkFromThanosMarker(&m), nil
 }
 
-// just get the tombstone filename and save that to a discovered list
-// do all the caching stuff and remove the old ones from the discovered list.
-// Then once we get the final list, remove duplicates
-// TODO make it work with the old tombstones to help with caching
 func (w *Updater) updateSeriesDeletionTombstones(ctx context.Context, oldTombstones []*cortex_tsdb.Tombstone) ([]*cortex_tsdb.Tombstone, error) {
 	out := make([]*cortex_tsdb.Tombstone, 0, len(oldTombstones))
 	discovered := make(map[string]cortex_tsdb.BlockDeleteRequestState)
