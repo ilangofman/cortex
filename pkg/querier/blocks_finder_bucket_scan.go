@@ -20,6 +20,7 @@ import (
 	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/objstore"
 
+	"github.com/cortexproject/cortex/pkg/chunk/purger"
 	"github.com/cortexproject/cortex/pkg/storage/bucket"
 	cortex_tsdb "github.com/cortexproject/cortex/pkg/storage/tsdb"
 	"github.com/cortexproject/cortex/pkg/storage/tsdb/bucketindex"
@@ -148,6 +149,11 @@ func (d *BucketScanBlocksFinder) GetBlocks(_ context.Context, userID string, min
 	}
 
 	return matchingMetas, matchingDeletionMarks, nil
+}
+
+func (d *BucketScanBlocksFinder) GetTombstones(_ context.Context, _ string, _ int64, _ int64) (*purger.TombstonesSet, error) {
+	level.Warn(util_log.Logger).Log("msg", "Series deletion query time Filtering is not supported without bucket index enabled")
+	return nil, nil
 }
 
 func (d *BucketScanBlocksFinder) starting(ctx context.Context) error {

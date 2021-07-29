@@ -38,6 +38,9 @@ type Index struct {
 	// List of block deletion marks.
 	BlockDeletionMarks BlockDeletionMarks `json:"block_deletion_marks"`
 
+	// List of tombstones that require query time filtering for deleted series
+	Tombstones SeriesDeletionTombstones `json:"series_deletion_tombstones"`
+
 	// UpdatedAt is a unix timestamp (seconds precision) of when the index has been updated
 	// (written in the storage) the last time.
 	UpdatedAt int64 `json:"updated_at"`
@@ -257,4 +260,16 @@ func (s Blocks) String() string {
 	}
 
 	return b.String()
+}
+
+// Holds all the tombstones that are currently required to be used for
+// filtering queries in the queriers.
+type SeriesDeletionTombstones []*cortex_tsdb.Tombstone
+
+func (s SeriesDeletionTombstones) GetRequestIDs() []string {
+	ids := make([]string, len(s))
+	for i, t := range s {
+		ids[i] = t.RequestID
+	}
+	return ids
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/thanos-io/thanos/pkg/objstore"
 
 	"github.com/cortexproject/cortex/pkg/storage/tsdb"
+	cortex_tsdb "github.com/cortexproject/cortex/pkg/storage/tsdb"
 	"github.com/cortexproject/cortex/pkg/storage/tsdb/bucketindex"
 	cortex_testutil "github.com/cortexproject/cortex/pkg/storage/tsdb/testutil"
 	"github.com/cortexproject/cortex/pkg/util"
@@ -98,6 +99,16 @@ func testBlocksCleanerWithOptions(t *testing.T, options testBlocksCleanerOptions
 	user4DebugMetaFile := path.Join("user-4", block.DebugMetas, "meta.json")
 	require.NoError(t, bucketClient.Upload(context.Background(), user4DebugMetaFile, strings.NewReader("some random content here")))
 
+	// create sample tombstones
+	tombstone1 := cortex_tsdb.NewTombstone("user-1", 100, 100, 0, 15, []string{"series1"}, "request1", cortex_tsdb.StatePending)
+	tombstone2 := cortex_tsdb.NewTombstone("user-1", 100, 100, 0, 15, []string{"series2"}, "request2", cortex_tsdb.StatePending)
+	tombstone3 := cortex_tsdb.NewTombstone("user-2", 100, 100, 0, 15, []string{"series1"}, "request3", cortex_tsdb.StatePending)
+	tombstone4 := cortex_tsdb.NewTombstone("user-2", 100, 100, 0, 15, []string{"series2"}, "request4", cortex_tsdb.StateCancelled)
+	uploadTombstone(t, bucketClient, "user-1", tombstone1)
+	uploadTombstone(t, bucketClient, "user-1", tombstone2)
+	uploadTombstone(t, bucketClient, "user-2", tombstone3)
+	uploadTombstone(t, bucketClient, "user-2", tombstone4)
+
 	// The fixtures have been created. If the bucket client wasn't wrapped to write
 	// deletion marks to the global location too, then this is the right time to do it.
 	if options.markersMigrationEnabled {
@@ -117,7 +128,7 @@ func testBlocksCleanerWithOptions(t *testing.T, options testBlocksCleanerOptions
 	scanner := tsdb.NewUsersScanner(bucketClient, tsdb.AllUsers, logger)
 	cfgProvider := newMockConfigProvider()
 
-	cleaner := NewBlocksCleaner(cfg, bucketClient, scanner, cfgProvider, logger, reg)
+	cleaner := NewBlocksCleaner(cfg, bucketClient, scanner, cfgProvider, newMockBucketStoreCfg(), logger, reg)
 	require.NoError(t, services.StartAndAwaitRunning(ctx, cleaner))
 	defer services.StopAndAwaitTerminated(ctx, cleaner) //nolint:errcheck
 
@@ -166,21 +177,26 @@ func testBlocksCleanerWithOptions(t *testing.T, options testBlocksCleanerOptions
 
 	// Check the updated bucket index.
 	for _, tc := range []struct {
-		userID         string
-		expectedIndex  bool
-		expectedBlocks []ulid.ULID
-		expectedMarks  []ulid.ULID
+		userID                string
+		expectedIndex         bool
+		expectedBlocks        []ulid.ULID
+		expectedMarks         []ulid.ULID
+		expectedTombstonesIDs []string
 	}{
 		{
-			userID:         "user-1",
-			expectedIndex:  true,
-			expectedBlocks: []ulid.ULID{block1, block2 /* deleted: block3, block4, block5, partial: block6 */},
-			expectedMarks:  []ulid.ULID{block2},
+			userID:                "user-1",
+			expectedIndex:         true,
+			expectedBlocks:        []ulid.ULID{block1, block2 /* deleted: block3, block4, block5, partial: block6 */},
+			expectedMarks:         []ulid.ULID{block2},
+			expectedTombstonesIDs: []string{"request1", "request2"},
 		}, {
-			userID:         "user-2",
-			expectedIndex:  true,
-			expectedBlocks: []ulid.ULID{block8},
-			expectedMarks:  []ulid.ULID{},
+			userID:                "user-2",
+			expectedIndex:         true,
+			expectedBlocks:        []ulid.ULID{block8},
+			expectedMarks:         []ulid.ULID{},
+			expectedTombstonesIDs: []string{"request3"},
+			// request4 should not be included because it is
+			// cancelled and should not be used for query filtering
 		}, {
 			userID:        "user-3",
 			expectedIndex: false,
@@ -195,6 +211,7 @@ func testBlocksCleanerWithOptions(t *testing.T, options testBlocksCleanerOptions
 		require.NoError(t, err)
 		assert.ElementsMatch(t, tc.expectedBlocks, idx.Blocks.GetULIDs())
 		assert.ElementsMatch(t, tc.expectedMarks, idx.BlockDeletionMarks.GetULIDs())
+		assert.ElementsMatch(t, tc.expectedTombstonesIDs, idx.Tombstones.GetRequestIDs())
 	}
 
 	assert.NoError(t, prom_testutil.GatherAndCompare(reg, strings.NewReader(`
@@ -251,7 +268,7 @@ func TestBlocksCleaner_ShouldContinueOnBlockDeletionFailure(t *testing.T) {
 	scanner := tsdb.NewUsersScanner(bucketClient, tsdb.AllUsers, logger)
 	cfgProvider := newMockConfigProvider()
 
-	cleaner := NewBlocksCleaner(cfg, bucketClient, scanner, cfgProvider, logger, nil)
+	cleaner := NewBlocksCleaner(cfg, bucketClient, scanner, cfgProvider, newMockBucketStoreCfg(), logger, nil)
 	require.NoError(t, services.StartAndAwaitRunning(ctx, cleaner))
 	defer services.StopAndAwaitTerminated(ctx, cleaner) //nolint:errcheck
 
@@ -297,6 +314,10 @@ func TestBlocksCleaner_ShouldRebuildBucketIndexOnCorruptedOne(t *testing.T) {
 	block3 := createTSDBBlock(t, bucketClient, userID, 30, 40, nil)
 	createDeletionMark(t, bucketClient, userID, block2, now.Add(-deletionDelay).Add(-time.Hour))
 	createDeletionMark(t, bucketClient, userID, block3, now.Add(-deletionDelay).Add(time.Hour))
+	tombstone1 := cortex_tsdb.NewTombstone(userID, 100, 100, 0, 15, []string{"series1"}, "request1", cortex_tsdb.StatePending)
+	tombstone2 := cortex_tsdb.NewTombstone(userID, 100, 100, 0, 15, []string{"series2"}, "request2", cortex_tsdb.StatePending)
+	uploadTombstone(t, bucketClient, userID, tombstone1)
+	uploadTombstone(t, bucketClient, userID, tombstone2)
 
 	// Write a corrupted bucket index.
 	require.NoError(t, bucketClient.Upload(ctx, path.Join(userID, bucketindex.IndexCompressedFilename), strings.NewReader("invalid!}")))
@@ -311,7 +332,7 @@ func TestBlocksCleaner_ShouldRebuildBucketIndexOnCorruptedOne(t *testing.T) {
 	scanner := tsdb.NewUsersScanner(bucketClient, tsdb.AllUsers, logger)
 	cfgProvider := newMockConfigProvider()
 
-	cleaner := NewBlocksCleaner(cfg, bucketClient, scanner, cfgProvider, logger, nil)
+	cleaner := NewBlocksCleaner(cfg, bucketClient, scanner, cfgProvider, newMockBucketStoreCfg(), logger, nil)
 	require.NoError(t, services.StartAndAwaitRunning(ctx, cleaner))
 	defer services.StopAndAwaitTerminated(ctx, cleaner) //nolint:errcheck
 
@@ -339,6 +360,7 @@ func TestBlocksCleaner_ShouldRebuildBucketIndexOnCorruptedOne(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []ulid.ULID{block1, block3}, idx.Blocks.GetULIDs())
 	assert.ElementsMatch(t, []ulid.ULID{block3}, idx.BlockDeletionMarks.GetULIDs())
+	assert.ElementsMatch(t, []string{"request1", "request2"}, idx.Tombstones.GetRequestIDs())
 }
 
 func TestBlocksCleaner_ShouldRemoveMetricsForTenantsNotBelongingAnymoreToTheShard(t *testing.T) {
@@ -362,7 +384,7 @@ func TestBlocksCleaner_ShouldRemoveMetricsForTenantsNotBelongingAnymoreToTheShar
 	scanner := tsdb.NewUsersScanner(bucketClient, tsdb.AllUsers, logger)
 	cfgProvider := newMockConfigProvider()
 
-	cleaner := NewBlocksCleaner(cfg, bucketClient, scanner, cfgProvider, logger, reg)
+	cleaner := NewBlocksCleaner(cfg, bucketClient, scanner, cfgProvider, newMockBucketStoreCfg(), logger, reg)
 	require.NoError(t, cleaner.cleanUsers(ctx, true))
 
 	assert.NoError(t, prom_testutil.GatherAndCompare(reg, strings.NewReader(`
@@ -420,7 +442,7 @@ func TestBlocksCleaner_ListBlocksOutsideRetentionPeriod(t *testing.T) {
 	id2 := createTSDBBlock(t, bucketClient, "user-1", 6000, 7000, nil)
 	id3 := createTSDBBlock(t, bucketClient, "user-1", 7000, 8000, nil)
 
-	w := bucketindex.NewUpdater(bucketClient, "user-1", nil, logger)
+	w := bucketindex.NewUpdater(bucketClient, "user-1", nil, 0, 0, newMockBucketStoreCfg(), logger)
 	idx, _, err := w.UpdateIndex(ctx, nil)
 	require.NoError(t, err)
 
@@ -493,7 +515,7 @@ func TestBlocksCleaner_ShouldRemoveBlocksOutsideRetentionPeriod(t *testing.T) {
 	scanner := tsdb.NewUsersScanner(bucketClient, tsdb.AllUsers, logger)
 	cfgProvider := newMockConfigProvider()
 
-	cleaner := NewBlocksCleaner(cfg, bucketClient, scanner, cfgProvider, logger, reg)
+	cleaner := NewBlocksCleaner(cfg, bucketClient, scanner, cfgProvider, newMockBucketStoreCfg(), logger, reg)
 
 	assertBlockExists := func(user string, block ulid.ULID, expectExists bool) {
 		exists, err := bucketClient.Exists(ctx, path.Join(user, block.String(), metadata.MetaFilename))
@@ -680,4 +702,13 @@ func (m *mockConfigProvider) S3SSEKMSKeyID(userID string) string {
 
 func (m *mockConfigProvider) S3SSEKMSEncryptionContext(userID string) string {
 	return ""
+}
+
+func newMockBucketStoreCfg() cortex_tsdb.BucketStoreConfig {
+	return cortex_tsdb.BucketStoreConfig{
+		SyncInterval: time.Minute,
+		BucketIndex: cortex_tsdb.BucketIndexConfig{
+			MaxStalePeriod: time.Hour,
+		},
+	}
 }

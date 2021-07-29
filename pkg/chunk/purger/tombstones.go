@@ -48,6 +48,14 @@ type TombstonesSet struct {
 	oldestTombstoneStart, newestTombstoneEnd model.Time // Used as optimization to find whether we want to iterate over tombstones or not
 }
 
+func NewTombstoneSet(t []DeleteRequest, start model.Time, end model.Time) *TombstonesSet {
+	return &TombstonesSet{
+		tombstones:           t,
+		oldestTombstoneStart: start,
+		newestTombstoneEnd:   end,
+	}
+}
+
 // Used for easier injection of mocks.
 type DeleteStoreAPI interface {
 	getCacheGenerationNumbers(ctx context.Context, user string) (*cacheGenNumbers, error)

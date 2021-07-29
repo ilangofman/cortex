@@ -32,8 +32,9 @@ const TombstonePath = "tombstones/"
 var (
 	ErrTombstoneAlreadyExists      = errors.New("The deletion tombstone with the same request information already exists")
 	ErrInvalidDeletionRequestState = errors.New("Deletion request filename extension indicating the state is invalid")
-
-	AllDeletionStates = []BlockDeleteRequestState{StatePending, StateProcessed, StateCancelled}
+	ErrTombstoneNotFound           = errors.New("Tombstone file not found in the object store")
+	ErrTombstoneDecode             = errors.New("Unable to read tombstone contents from file")
+	AllDeletionStates              = []BlockDeleteRequestState{StatePending, StateProcessed, StateCancelled}
 )
 
 type Tombstone struct {
@@ -45,7 +46,7 @@ type Tombstone struct {
 	Selectors        []string                `json:"selectors"`
 	Matchers         []*labels.Matcher       `json:"-"`
 	UserID           string                  `json:"user_id"`
-	State            BlockDeleteRequestState `json:"-"`
+	State            BlockDeleteRequestState `json:"state"`
 }
 
 func NewTombstone(userID string, requestTime int64, stateTime int64, startTime int64, endTime int64, selectors []string, requestID string, state BlockDeleteRequestState) *Tombstone {
@@ -117,7 +118,7 @@ func GetDeleteRequestByIDForUser(ctx context.Context, bkt objstore.Bucket, cfgPr
 		}
 
 		if exists {
-			t, err := readTombstoneFile(ctx, userBucket, userID, path.Join(TombstonePath, filename))
+			t, err := ReadTombstoneFile(ctx, userBucket, path.Join(TombstonePath, filename))
 			if err != nil {
 				return nil, err
 			}
@@ -142,7 +143,7 @@ func GetAllDeleteRequestsForUser(ctx context.Context, bkt objstore.Bucket, cfgPr
 	// if a key exists with the same request ID (but two different states)
 	tombstoneMap := make(map[string]*Tombstone)
 	err := userBucket.Iter(ctx, "tombstones/", func(s string) error {
-		t, err := readTombstoneFile(ctx, userBucket, userID, s)
+		t, err := ReadTombstoneFile(ctx, userBucket, s)
 		if err != nil {
 			return err
 		}
@@ -175,12 +176,12 @@ func GetAllDeleteRequestsForUser(ctx context.Context, bkt objstore.Bucket, cfgPr
 }
 
 func getLatestTombstateByState(a *Tombstone, b *Tombstone) (*Tombstone, error) {
-	orderA, err := a.GetStateOrder()
+	orderA, err := a.State.GetStateOrder()
 	if err != nil {
 		return nil, err
 	}
 
-	orderB, err := b.GetStateOrder()
+	orderB, err := b.State.GetStateOrder()
 	if err != nil {
 		return nil, err
 	}
@@ -192,29 +193,16 @@ func getLatestTombstateByState(a *Tombstone, b *Tombstone) (*Tombstone, error) {
 	return a, nil
 }
 
-func readTombstoneFile(ctx context.Context, bkt objstore.BucketReader, userID string, tombstonePath string) (*Tombstone, error) {
-	userLogger := util_log.WithUserID(userID, util_log.Logger)
-
-	// request filename is in format of request_id + "." + state + ".json"
-
-	// This should get the first extension which is .json
-	filenameExtesion := filepath.Ext(tombstonePath)
-	filenameWithoutJSON := tombstonePath[0 : len(tombstonePath)-len(filenameExtesion)]
-
-	stateExtension := filepath.Ext(filenameWithoutJSON)
-
-	// Ensure that the state exists as the filename extension
-	if len(stateExtension) == 0 {
-		return nil, ErrInvalidDeletionRequestState
-	}
-
-	state := BlockDeleteRequestState(stateExtension[1:])
-	if !isValidDeleteRequestState(state) {
-		return nil, errors.Wrapf(ErrInvalidDeletionRequestState, "Filename extension is invalid for tombstone: %s", tombstonePath)
-
+func ReadTombstoneFile(ctx context.Context, bkt objstore.BucketReader, tombstonePath string) (*Tombstone, error) {
+	_, _, err := ParseTombstonePath(tombstonePath)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to get the state from filename: %s", tombstonePath)
 	}
 
 	r, err := bkt.Get(ctx, tombstonePath)
+	if bkt.IsObjNotFoundErr(err) {
+		return nil, errors.Wrapf(ErrTombstoneNotFound, "tombstone file not found %s", tombstonePath)
+	}
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to read tombstone object: %s", tombstonePath)
 	}
@@ -224,16 +212,14 @@ func readTombstoneFile(ctx context.Context, bkt objstore.BucketReader, userID st
 
 	// Close reader before dealing with decode error.
 	if closeErr := r.Close(); closeErr != nil {
-		level.Warn(userLogger).Log("msg", "failed to close bucket reader", "err", closeErr)
+		level.Warn(util_log.Logger).Log("msg", "failed to close bucket reader", "err", closeErr)
 	}
 
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to decode tombstone object: %s", tombstonePath)
+		return nil, errors.Wrapf(ErrTombstoneDecode, "failed to decode tombstone object: %s, err: %v", tombstonePath, err.Error())
 	}
 
-	tombstone.State = BlockDeleteRequestState(state)
-
-	tombstone.Matchers, err = parseMatchers(tombstone.Selectors)
+	tombstone.Matchers, err = ParseMatchers(tombstone.Selectors)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to parse tombstone selectors for: %s", tombstonePath)
 	}
@@ -241,7 +227,29 @@ func readTombstoneFile(ctx context.Context, bkt objstore.BucketReader, userID st
 	return tombstone, nil
 }
 
-func parseMatchers(selectors []string) ([]*labels.Matcher, error) {
+func ParseTombstonePath(tombstonePath string) (string, BlockDeleteRequestState, error) {
+	// This should get the first extension which is .json
+	filenameExtesion := filepath.Ext(tombstonePath)
+	filenameWithoutJSON := tombstonePath[0 : len(tombstonePath)-len(filenameExtesion)]
+
+	stateExtension := filepath.Ext(filenameWithoutJSON)
+	requestID := filenameWithoutJSON[0 : len(filenameWithoutJSON)-len(stateExtension)]
+
+	// Ensure that the state exists as the filename extension
+	if len(stateExtension) == 0 {
+		return "", "", ErrInvalidDeletionRequestState
+	}
+
+	state := BlockDeleteRequestState(stateExtension[1:])
+	if !isValidDeleteRequestState(state) {
+		return "", "", errors.Wrapf(ErrInvalidDeletionRequestState, "Filename extension is invalid for tombstone: %s", tombstonePath)
+
+	}
+
+	return requestID, state, nil
+}
+
+func ParseMatchers(selectors []string) ([]*labels.Matcher, error) {
 	// Convert the string selectors to label matchers
 	var m []*labels.Matcher
 
@@ -312,6 +320,14 @@ func RemoveCancelledStateIfExists(ctx context.Context, bkt objstore.Bucket, user
 	return nil
 }
 
+func (t *Tombstone) GetFilename() string {
+	return t.RequestID + "." + string(t.State) + ".json"
+}
+
+func (t Tombstone) IsOverlappingInterval(minT int64, maxT int64) bool {
+	return t.StartTime <= maxT && minT < t.EndTime
+}
+
 func isValidDeleteRequestState(state BlockDeleteRequestState) bool {
 	switch state {
 	case
@@ -323,8 +339,8 @@ func isValidDeleteRequestState(state BlockDeleteRequestState) bool {
 	return false
 }
 
-func (t *Tombstone) GetStateOrder() (int, error) {
-	switch t.State {
+func (s BlockDeleteRequestState) GetStateOrder() (int, error) {
+	switch s {
 	case StatePending:
 		return 0, nil
 	case StateProcessed:

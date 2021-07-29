@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io/ioutil"
 	"path"
+	"path/filepath"
 	"time"
 
 	"github.com/go-kit/kit/log"
@@ -17,6 +18,7 @@ import (
 	"github.com/thanos-io/thanos/pkg/runutil"
 
 	"github.com/cortexproject/cortex/pkg/storage/bucket"
+	cortex_tsdb "github.com/cortexproject/cortex/pkg/storage/tsdb"
 	util_log "github.com/cortexproject/cortex/pkg/util/log"
 )
 
@@ -25,18 +27,34 @@ var (
 	ErrBlockMetaCorrupted         = block.ErrorSyncMetaCorrupted
 	ErrBlockDeletionMarkNotFound  = errors.New("block deletion mark not found")
 	ErrBlockDeletionMarkCorrupted = errors.New("block deletion mark corrupted")
+	ErrTombstoneNotFound          = errors.New("Tombstone file not found")
+	ErrTombstoneCorrupted         = errors.New("Tombstone file corrupted")
 )
 
 // Updater is responsible to generate an update in-memory bucket index.
 type Updater struct {
-	bkt    objstore.InstrumentedBucket
-	logger log.Logger
+	bkt                   objstore.InstrumentedBucket
+	blocksDeletionDelay   time.Duration
+	blocksCleanupInterval time.Duration
+	bktCfg                cortex_tsdb.BucketStoreConfig
+	logger                log.Logger
 }
 
-func NewUpdater(bkt objstore.Bucket, userID string, cfgProvider bucket.TenantConfigProvider, logger log.Logger) *Updater {
+func NewUpdater(
+	bkt objstore.Bucket,
+	userID string,
+	cfgProvider bucket.TenantConfigProvider,
+	deletionDelay time.Duration,
+	cleanupInterval time.Duration,
+	bktCfg cortex_tsdb.BucketStoreConfig,
+	logger log.Logger) *Updater {
+
 	return &Updater{
-		bkt:    bucket.NewUserBucketClient(userID, bkt, cfgProvider),
-		logger: util_log.WithUserID(userID, logger),
+		bkt:                   bucket.NewUserBucketClient(userID, bkt, cfgProvider),
+		blocksDeletionDelay:   deletionDelay,
+		blocksCleanupInterval: cleanupInterval,
+		bktCfg:                bktCfg,
+		logger:                util_log.WithUserID(userID, logger),
 	}
 }
 
@@ -45,11 +63,13 @@ func NewUpdater(bkt objstore.Bucket, userID string, cfgProvider bucket.TenantCon
 func (w *Updater) UpdateIndex(ctx context.Context, old *Index) (*Index, map[ulid.ULID]error, error) {
 	var oldBlocks []*Block
 	var oldBlockDeletionMarks []*BlockDeletionMark
+	var oldTombstones []*cortex_tsdb.Tombstone
 
 	// Read the old index, if provided.
 	if old != nil {
 		oldBlocks = old.Blocks
 		oldBlockDeletionMarks = old.BlockDeletionMarks
+		oldTombstones = old.Tombstones
 	}
 
 	blocks, partials, err := w.updateBlocks(ctx, oldBlocks)
@@ -62,10 +82,16 @@ func (w *Updater) UpdateIndex(ctx context.Context, old *Index) (*Index, map[ulid
 		return nil, nil, err
 	}
 
+	tombstones, err := w.updateSeriesDeletionTombstones(ctx, oldTombstones)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	return &Index{
 		Version:            IndexVersion1,
 		Blocks:             blocks,
 		BlockDeletionMarks: blockDeletionMarks,
+		Tombstones:         tombstones,
 		UpdatedAt:          time.Now().Unix(),
 	}, partials, nil
 }
@@ -222,4 +248,118 @@ func (w *Updater) updateBlockDeletionMarkIndexEntry(ctx context.Context, id ulid
 	}
 
 	return BlockDeletionMarkFromThanosMarker(&m), nil
+}
+
+// just get the tombstone filename and save that to a discovered list
+// do all the caching stuff and remove the old ones from the discovered list.
+// Then once we get the final list, remove duplicates
+// TODO make it work with the old tombstones to help with caching
+func (w *Updater) updateSeriesDeletionTombstones(ctx context.Context, oldTombstones []*cortex_tsdb.Tombstone) ([]*cortex_tsdb.Tombstone, error) {
+	out := make([]*cortex_tsdb.Tombstone, 0, len(oldTombstones))
+	discovered := make(map[string]cortex_tsdb.BlockDeleteRequestState)
+
+	err := w.bkt.Iter(ctx, "tombstones/", func(s string) error {
+		tName := filepath.Base(s)
+		requestID, state, err := cortex_tsdb.ParseTombstonePath(tName)
+		if err != nil {
+			return err
+		}
+
+		if prevState, exists := discovered[requestID]; !exists {
+			discovered[requestID] = state
+		} else {
+			// if there is more than one tombstone for a given request,
+			// we only want to keep track of the one with the latest state
+			orderA, err := state.GetStateOrder()
+			if err != nil {
+				return err
+			}
+			orderB, err := prevState.GetStateOrder()
+			if err != nil {
+				return err
+			}
+
+			// If the new state found is the lastest, then we replace the tombstone state in the map
+			if orderA > orderB {
+				discovered[requestID] = state
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Since tombstones are immutable, all tombstones already existing in the index can just be copied.
+	for _, t := range oldTombstones {
+		if state, ok := discovered[t.RequestID]; ok && state == t.State {
+			if w.isTombstoneForFiltering(t) {
+				out = append(out, t)
+			}
+			delete(discovered, t.RequestID)
+		}
+	}
+
+	// Remaining tombstones are new ones and we have to fetch them.
+	for id, state := range discovered {
+		t, err := w.updateTombstoneIndexEntry(ctx, id, state)
+		if errors.Is(err, ErrTombstoneNotFound) {
+			// This could happen if the series deletion cleaner removes the tombstone or the user cancels it between
+			// the "list objects" and now
+			level.Warn(w.logger).Log("msg", "skipped missing tombstone file when updating bucket index", "requestID", id, "state", string(state))
+			continue
+		}
+		if errors.Is(err, ErrTombstoneCorrupted) {
+			level.Error(w.logger).Log("msg", "skipped corrupted tombstone file when updating bucket index", "requestID", id, "state", state, "err", err)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		if w.isTombstoneForFiltering(t) {
+			out = append(out, t)
+		}
+	}
+
+	return out, nil
+
+}
+
+func (w *Updater) updateTombstoneIndexEntry(ctx context.Context, requestID string, state cortex_tsdb.BlockDeleteRequestState) (*cortex_tsdb.Tombstone, error) {
+
+	filename := requestID + "." + string(state) + ".json"
+	t, err := cortex_tsdb.ReadTombstoneFile(ctx, w.bkt, path.Join(cortex_tsdb.TombstonePath, filename))
+	if errors.Is(err, cortex_tsdb.ErrTombstoneNotFound) {
+		return nil, errors.Wrap(ErrTombstoneNotFound, err.Error())
+	}
+	if errors.Is(err, cortex_tsdb.ErrTombstoneDecode) {
+		return nil, errors.Wrap(ErrTombstoneCorrupted, err.Error())
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return t, nil
+}
+
+func (w *Updater) isTombstoneForFiltering(t *cortex_tsdb.Tombstone) bool {
+	if t.State == cortex_tsdb.StatePending {
+		return true
+	}
+
+	// Once the tombstone has been processed for permanent deletions, the data has been rewritten and
+	// the old block have been marked for deletion.
+	// The tombstones need to be used for query time filtering until we can guarantee that the queriers
+	// have picked up the new blocks and no longer will query any of the deleted blocks.
+	// This time should be enough to guarantee that the new blocks will be queried:
+	filterTimeAfterProcessed := w.bktCfg.SyncInterval.Milliseconds() + w.blocksDeletionDelay.Milliseconds() + w.blocksCleanupInterval.Milliseconds()
+	timePassedSinceProcessed := (time.Now().Unix() * 1000) - t.StateCreatedAt
+
+	if t.State == cortex_tsdb.StateProcessed && filterTimeAfterProcessed > timePassedSinceProcessed {
+		return true
+	}
+
+	return false
 }

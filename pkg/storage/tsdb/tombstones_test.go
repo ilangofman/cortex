@@ -240,22 +240,28 @@ func TestTombstoneReadWithInvalidFileName(t *testing.T) {
 
 	{
 		tInvalidPath := username + "/tombstones/" + requestID + "." + string(StatePending)
-		_, err := readTombstoneFile(ctx, bkt, username, tInvalidPath)
+		_, err := ReadTombstoneFile(ctx, bkt, tInvalidPath)
 
 		require.ErrorIs(t, err, ErrInvalidDeletionRequestState)
 	}
 
 	{
 		tInvalidPath := username + "/tombstones/" + requestID
-		_, err := readTombstoneFile(ctx, bkt, username, tInvalidPath)
+		_, err := ReadTombstoneFile(ctx, bkt, tInvalidPath)
 
 		require.ErrorIs(t, err, ErrInvalidDeletionRequestState)
 	}
 
 	{
 		tInvalidPath := username + "/tombstones/" + requestID + ".json." + string(StatePending)
-		_, err := readTombstoneFile(ctx, bkt, username, tInvalidPath)
+		_, err := ReadTombstoneFile(ctx, bkt, tInvalidPath)
 		require.ErrorIs(t, err, ErrInvalidDeletionRequestState)
+	}
+
+	{
+		tNotExists := username + "/tombstones/" + requestID + "." + string(StatePending) + ".json"
+		_, err := ReadTombstoneFile(ctx, bkt, tNotExists)
+		require.ErrorIs(t, err, ErrTombstoneNotFound)
 	}
 
 }

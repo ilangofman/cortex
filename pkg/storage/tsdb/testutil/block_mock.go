@@ -1,14 +1,17 @@
 package testutil
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 	"testing"
 	"time"
 
+	cortex_tsdb "github.com/cortexproject/cortex/pkg/storage/tsdb"
 	"github.com/oklog/ulid"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/stretchr/testify/require"
@@ -65,4 +68,32 @@ func MockStorageDeletionMark(t testing.TB, bucket objstore.Bucket, userID string
 	require.NoError(t, bucket.Upload(context.Background(), markPath, markContentReader))
 
 	return &mark
+}
+
+func MockTombstone(
+	t testing.TB,
+	bucket objstore.Bucket,
+	userID string,
+	requestTime,
+	stateTime,
+	startTime,
+	endTime int64,
+	selectors []string,
+	requestID string,
+	state cortex_tsdb.BlockDeleteRequestState) *cortex_tsdb.Tombstone {
+
+	ts := cortex_tsdb.NewTombstone(userID, requestTime, stateTime, startTime, endTime, selectors, requestID, state)
+
+	tombstoneFilename := ts.GetFilename()
+	path := path.Join(userID, cortex_tsdb.TombstonePath, tombstoneFilename)
+	data, err := json.Marshal(ts)
+
+	require.NoError(t, err)
+	require.NoError(t, bucket.Upload(context.Background(), path, bytes.NewReader(data)))
+
+	ts.Matchers, err = cortex_tsdb.ParseMatchers(ts.Selectors)
+	require.NoError(t, err)
+
+	return ts
+
 }
