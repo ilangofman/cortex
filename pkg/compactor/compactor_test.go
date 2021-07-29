@@ -1046,7 +1046,6 @@ func uploadTombstone(t *testing.T, bkt objstore.Bucket, userID string, tombstone
 
 	require.NoError(t, err)
 	require.NoError(t, bkt.Upload(context.Background(), path, bytes.NewReader(data)))
-
 }
 
 func findCompactorByUserID(compactors []*Compactor, logs []*concurrency.SyncBuffer, userID string) (*Compactor, *concurrency.SyncBuffer, error) {

@@ -51,7 +51,6 @@ func NewBucketIndexBlocksFinder(cfg BucketIndexBlocksFinderConfig, bkt objstore.
 }
 
 // GetBlocks implements BlocksFinder.
-// ILAN IMPORTANT
 func (f *BucketIndexBlocksFinder) GetBlocks(ctx context.Context, userID string, minT, maxT int64) (bucketindex.Blocks, map[ulid.ULID]*bucketindex.BlockDeletionMark, error) {
 	if f.State() != services.Running {
 		return nil, nil, errBucketIndexBlocksFinderNotRunning
