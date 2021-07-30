@@ -152,7 +152,7 @@ func (d *BucketScanBlocksFinder) GetBlocks(_ context.Context, userID string, min
 }
 
 func (d *BucketScanBlocksFinder) GetTombstones(_ context.Context, _ string, _ int64, _ int64) (*purger.TombstonesSet, error) {
-	level.Warn(util_log.Logger).Log("msg", "Series deletion query time Filtering is not supported without bucket index enabled")
+	// Series deletion query time filtering is not supported without bucket index enabled
 	return nil, nil
 }
 

@@ -350,10 +350,8 @@ func (w *Updater) isTombstoneForFiltering(t *cortex_tsdb.Tombstone) bool {
 	// The tombstones need to be used for query time filtering until we can guarantee that the queriers
 	// have picked up the new blocks and no longer will query any of the deleted blocks.
 	// This time should be enough to guarantee that the new blocks will be queried:
-	filterTimeAfterProcessed := w.bktCfg.SyncInterval.Milliseconds() + w.blocksDeletionDelay.Milliseconds() + w.blocksCleanupInterval.Milliseconds()
-	timePassedSinceProcessed := (time.Now().Unix() * 1000) - t.StateCreatedAt
-
-	if t.State == cortex_tsdb.StateProcessed && filterTimeAfterProcessed > timePassedSinceProcessed {
+	filterTimeAfterProcessed := w.bktCfg.SyncInterval + w.blocksDeletionDelay + w.blocksCleanupInterval
+	if t.State == cortex_tsdb.StateProcessed && filterTimeAfterProcessed > time.Since(t.GetStateTime()) {
 		return true
 	}
 

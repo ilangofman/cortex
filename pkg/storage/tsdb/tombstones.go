@@ -324,8 +324,12 @@ func (t *Tombstone) GetFilename() string {
 	return t.RequestID + "." + string(t.State) + ".json"
 }
 
-func (t Tombstone) IsOverlappingInterval(minT int64, maxT int64) bool {
+func (t *Tombstone) IsOverlappingInterval(minT int64, maxT int64) bool {
 	return t.StartTime <= maxT && minT < t.EndTime
+}
+
+func (t *Tombstone) GetStateTime() time.Time {
+	return time.Unix(t.StateCreatedAt/1000, 0)
 }
 
 func isValidDeleteRequestState(state BlockDeleteRequestState) bool {
