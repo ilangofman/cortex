@@ -406,12 +406,10 @@ func (c *DeletedSeriesCleaner) rewriteBlockWithoutDeletedSeries(ctx context.Cont
 	numSamplesBeforeDeletion := meta.Stats.NumSamples
 
 	comp := compactv2.New(tmpDir, userLogger, changeLog, chunkPool)
-	level.Info(userLogger).Log("msg", "starting rewrite for block", "source", id, "new", newID)
+	level.Info(userLogger).Log("msg", "starting series deletion rewrite for block", "block", id)
 	if err := comp.WriteSeries(ctx, []block.Reader{b}, d, p, compactv2.WithDeletionModifier(del...)); err != nil {
 		return emptyULID, errors.Wrapf(err, "writing series from %v to %v", id, newID)
 	}
-
-	level.Info(userLogger).Log("msg", "wrote new block after modifications; flushing", "source", id, "new", newID)
 	meta.Stats, err = d.Flush()
 	if err != nil {
 		return emptyULID, errors.Wrap(err, "flush")
@@ -422,6 +420,7 @@ func (c *DeletedSeriesCleaner) rewriteBlockWithoutDeletedSeries(ctx context.Cont
 		c.tenentBlocksProcessedTotal.WithLabelValues(userID).Inc()
 		return emptyULID, nil
 	} else if meta.Stats.NumSamples == 0 {
+		level.Info(userLogger).Log("msg", "No samples from the block were deleted", "block", id)
 		// everything has been deleted
 		// the new block would be empty, so no need to upload it, still need to mark the old one for deletion
 		if err := block.MarkForDeletion(
@@ -431,7 +430,7 @@ func (c *DeletedSeriesCleaner) rewriteBlockWithoutDeletedSeries(ctx context.Cont
 			level.Warn(userLogger).Log("msg", "failed to mark block for deletion", "block", id, "err", err)
 			return emptyULID, err
 		}
-
+		level.Info(userLogger).Log("msg", "Block was completely deleted", "block", id)
 		return emptyULID, nil
 	}
 
@@ -439,13 +438,12 @@ func (c *DeletedSeriesCleaner) rewriteBlockWithoutDeletedSeries(ctx context.Cont
 		return emptyULID, err
 	}
 
-	level.Info(userLogger).Log("msg", "uploading new block", "source", id, "new", newID)
+	level.Info(userLogger).Log("msg", "uploading new block after series deletion", "source", id, "new", newID)
 	if err := block.Upload(ctx, userLogger, userBucketClient, filepath.Join(tmpDir, newID.String()), metadata.NoneFunc); err != nil {
 		return newID, errors.Wrap(err, "upload")
 	}
 
 	level.Info(userLogger).Log("msg", "marking block for deletion after it has been rewritten", "block", id)
-
 	// the old block is no longer required as it has been rewritten, can delete it now
 	if err := block.MarkForDeletion(
 		ctx, userLogger, userBucketClient, id,

@@ -279,7 +279,6 @@ func (a *API) RegisterChunksPurger(store *purger.DeleteStore, deleteRequestCance
 	a.RegisterRoute(path.Join(a.cfg.LegacyHTTPPrefix, "/api/v1/admin/tsdb/cancel_delete_request"), http.HandlerFunc(deleteRequestHandler.CancelDeleteRequestHandler), true, "PUT", "POST")
 }
 
-
 func (a *API) RegisterBlocksPurger(blocksPurger *purger.BlocksPurgerAPI, seriesDeletionEnabled bool) {
 
 	if seriesDeletionEnabled {
@@ -292,7 +291,6 @@ func (a *API) RegisterBlocksPurger(blocksPurger *purger.BlocksPurgerAPI, seriesD
 		a.RegisterRoute(path.Join(a.cfg.LegacyHTTPPrefix, "/api/v1/admin/tsdb/delete_series"), http.HandlerFunc(blocksPurger.AddDeleteRequestHandler), true, "GET")
 		a.RegisterRoute(path.Join(a.cfg.LegacyHTTPPrefix, "/api/v1/admin/tsdb/cancel_delete_request"), http.HandlerFunc(blocksPurger.CancelDeleteRequestHandler), true, "PUT", "POST")
 	}
-
 	// Tenant Deletion
 	a.RegisterRoute("/purger/delete_tenant", http.HandlerFunc(blocksPurger.DeleteTenant), true, "POST")
 	a.RegisterRoute("/purger/delete_tenant_status", http.HandlerFunc(blocksPurger.DeleteTenantStatus), true, "GET")

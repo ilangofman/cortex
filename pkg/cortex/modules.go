@@ -896,7 +896,7 @@ func (t *Cortex) setupModuleManager() error {
 		BlocksPurger:             {Store, API, Overrides},
 		Purger:                   {ChunksPurger, BlocksPurger},
 		TenantFederation:         {Queryable},
-		All:                      {QueryFrontend, Querier, Ingester, Distributor, TableManager, Purger, StoreGateway, Ruler, Compactor},
+		All:                      {QueryFrontend, Querier, Ingester, Distributor, TableManager, Purger, StoreGateway, Ruler},
 	}
 	for mod, targets := range deps {
 		if err := mm.AddDependency(mod, targets...); err != nil {
