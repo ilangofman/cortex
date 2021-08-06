@@ -64,7 +64,7 @@ func NewBlocksCleaner(cfg BlocksCleanerConfig, bucketClient objstore.Bucket, use
 		bucketClient: bucketClient,
 		usersScanner: usersScanner,
 		cfgProvider:  cfgProvider,
-		logger:       log.With(logger, "component", "cleaner"),
+		logger:       log.With(logger, "component", "blocks-cleaner"),
 		runsStarted: promauto.With(reg).NewCounter(prometheus.CounterOpts{
 			Name: "cortex_compactor_block_cleanup_started_total",
 			Help: "Total number of blocks cleanup runs started.",

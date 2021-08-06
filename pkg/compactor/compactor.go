@@ -25,6 +25,7 @@ import (
 	"github.com/thanos-io/thanos/pkg/compact/downsample"
 	"github.com/thanos-io/thanos/pkg/objstore"
 
+	"github.com/cortexproject/cortex/pkg/chunk/purger"
 	"github.com/cortexproject/cortex/pkg/ring"
 	"github.com/cortexproject/cortex/pkg/storage/bucket"
 	cortex_tsdb "github.com/cortexproject/cortex/pkg/storage/tsdb"
@@ -88,18 +89,20 @@ type BlocksCompactorFactory func(
 
 // Config holds the Compactor config.
 type Config struct {
-	BlockRanges           cortex_tsdb.DurationList `yaml:"block_ranges"`
-	BlockSyncConcurrency  int                      `yaml:"block_sync_concurrency"`
-	MetaSyncConcurrency   int                      `yaml:"meta_sync_concurrency"`
-	ConsistencyDelay      time.Duration            `yaml:"consistency_delay"`
-	DataDir               string                   `yaml:"data_dir"`
-	CompactionInterval    time.Duration            `yaml:"compaction_interval"`
-	CompactionRetries     int                      `yaml:"compaction_retries"`
-	CompactionConcurrency int                      `yaml:"compaction_concurrency"`
-	CleanupInterval       time.Duration            `yaml:"cleanup_interval"`
-	CleanupConcurrency    int                      `yaml:"cleanup_concurrency"`
-	DeletionDelay         time.Duration            `yaml:"deletion_delay"`
-	TenantCleanupDelay    time.Duration            `yaml:"tenant_cleanup_delay"`
+	BlockRanges                   cortex_tsdb.DurationList `yaml:"block_ranges"`
+	BlockSyncConcurrency          int                      `yaml:"block_sync_concurrency"`
+	MetaSyncConcurrency           int                      `yaml:"meta_sync_concurrency"`
+	ConsistencyDelay              time.Duration            `yaml:"consistency_delay"`
+	DataDir                       string                   `yaml:"data_dir"`
+	CompactionInterval            time.Duration            `yaml:"compaction_interval"`
+	CompactionRetries             int                      `yaml:"compaction_retries"`
+	CompactionConcurrency         int                      `yaml:"compaction_concurrency"`
+	CleanupInterval               time.Duration            `yaml:"cleanup_interval"`
+	CleanupConcurrency            int                      `yaml:"cleanup_concurrency"`
+	DeletionDelay                 time.Duration            `yaml:"deletion_delay"`
+	TenantCleanupDelay            time.Duration            `yaml:"tenant_cleanup_delay"`
+	SeriesDeletionCleanupInterval time.Duration            `yaml:"series_deletion_cleanup_interval"`
+	SeriesDeletionConcurrency     int                      `yaml:"series_deletion_concurrency"`
 
 	// Whether the migration of block deletion marks to the global markers location is enabled.
 	BlockDeletionMarksMigrationEnabled bool `yaml:"block_deletion_marks_migration_enabled"`
@@ -147,6 +150,9 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.DurationVar(&cfg.TenantCleanupDelay, "compactor.tenant-cleanup-delay", 6*time.Hour, "For tenants marked for deletion, this is time between deleting of last block, and doing final cleanup (marker files, debug files) of the tenant.")
 	f.BoolVar(&cfg.BlockDeletionMarksMigrationEnabled, "compactor.block-deletion-marks-migration-enabled", true, "When enabled, at compactor startup the bucket will be scanned and all found deletion marks inside the block location will be copied to the markers global location too. This option can (and should) be safely disabled as soon as the compactor has successfully run at least once.")
 
+	f.DurationVar(&cfg.SeriesDeletionCleanupInterval, "compactor.series-deletion-cleanup-interval", 2*time.Minute, "How frequently compactor should run the series deletion delay service and rewrite the old blocks")
+	f.IntVar(&cfg.SeriesDeletionConcurrency, "compactor.series-deletion-concurrency", 20, "Max number of tenants for which the series deletion cleaner should run concurrently.")
+
 	f.Var(&cfg.EnabledTenants, "compactor.enabled-tenants", "Comma separated list of tenants that can be compacted. If specified, only these tenants will be compacted by compactor, otherwise all tenants can be compacted. Subject to sharding.")
 	f.Var(&cfg.DisabledTenants, "compactor.disabled-tenants", "Comma separated list of tenants that cannot be compacted by this compactor. If specified, and compactor would normally pick given tenant for compaction (via -compactor.enabled-tenants or sharding), it will be ignored instead.")
 }
@@ -179,6 +185,7 @@ type Compactor struct {
 	parentLogger   log.Logger
 	registerer     prometheus.Registerer
 	allowedTenants *util.AllowedTenants
+	purgerCfg      purger.Config // Required for the series deletion cleaner
 
 	// Functions that creates bucket client, grouper, planner and compactor using the context.
 	// Useful for injecting mock objects from tests.
@@ -191,6 +198,9 @@ type Compactor struct {
 
 	// Blocks cleaner is responsible to hard delete blocks marked for deletion.
 	blocksCleaner *BlocksCleaner
+
+	// Deleted series cleaner is responsible for performing permeanent deletion of time series data
+	deletedSeriesCleaner *DeletedSeriesCleaner
 
 	// Underlying compactor and planner used to compact TSDB blocks.
 	blocksCompactor compact.Compactor
@@ -223,7 +233,7 @@ type Compactor struct {
 }
 
 // NewCompactor makes a new Compactor.
-func NewCompactor(compactorCfg Config, storageCfg cortex_tsdb.BlocksStorageConfig, cfgProvider ConfigProvider, logger log.Logger, registerer prometheus.Registerer) (*Compactor, error) {
+func NewCompactor(compactorCfg Config, storageCfg cortex_tsdb.BlocksStorageConfig, cfgProvider ConfigProvider, logger log.Logger, registerer prometheus.Registerer, purgerCfg purger.Config) (*Compactor, error) {
 	bucketClientFactory := func(ctx context.Context) (objstore.Bucket, error) {
 		return bucket.NewClient(ctx, storageCfg.Bucket, "compactor", logger, registerer)
 	}
@@ -238,7 +248,7 @@ func NewCompactor(compactorCfg Config, storageCfg cortex_tsdb.BlocksStorageConfi
 		blocksCompactorFactory = DefaultBlocksCompactorFactory
 	}
 
-	cortexCompactor, err := newCompactor(compactorCfg, storageCfg, cfgProvider, logger, registerer, bucketClientFactory, blocksGrouperFactory, blocksCompactorFactory)
+	cortexCompactor, err := newCompactor(compactorCfg, storageCfg, cfgProvider, logger, registerer, bucketClientFactory, blocksGrouperFactory, blocksCompactorFactory, purgerCfg)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create Cortex blocks compactor")
 	}
@@ -255,6 +265,7 @@ func newCompactor(
 	bucketClientFactory func(ctx context.Context) (objstore.Bucket, error),
 	blocksGrouperFactory BlocksGrouperFactory,
 	blocksCompactorFactory BlocksCompactorFactory,
+	purgerCfg purger.Config,
 ) (*Compactor, error) {
 	c := &Compactor{
 		compactorCfg:           compactorCfg,
@@ -267,6 +278,7 @@ func newCompactor(
 		bucketClientFactory:    bucketClientFactory,
 		blocksGrouperFactory:   blocksGrouperFactory,
 		blocksCompactorFactory: blocksCompactorFactory,
+		purgerCfg:              purgerCfg,
 		allowedTenants:         util.NewAllowedTenants(compactorCfg.EnabledTenants, compactorCfg.DisabledTenants),
 
 		compactionRunsStarted: promauto.With(registerer).NewCounter(prometheus.CounterOpts{
@@ -362,6 +374,13 @@ func (c *Compactor) starting(ctx context.Context) error {
 		TenantCleanupDelay:                 c.compactorCfg.TenantCleanupDelay,
 	}, c.bucketClient, c.usersScanner, c.cfgProvider, c.parentLogger, c.registerer)
 
+	// Create the deleted series cleaner (service), responsible for processing permanent series deletion
+	c.deletedSeriesCleaner = NewDeletedSeriesCleaner(DeletedSeriesCleanerConfig{
+		CleanupInterval:       util.DurationWithJitter(c.compactorCfg.SeriesDeletionCleanupInterval, 0.1),
+		CleanupConcurrency:    c.compactorCfg.SeriesDeletionConcurrency,
+		CompactionBlockRanges: c.compactorCfg.BlockRanges,
+	}, c.bucketClient, c.usersScanner, c.cfgProvider, c.purgerCfg, c.parentLogger, c.registerer)
+
 	// Initialize the compactors ring if sharding is enabled.
 	if c.compactorCfg.ShardingEnabled {
 		lifecyclerCfg := c.compactorCfg.ShardingRing.ToLifecyclerConfig()
@@ -425,6 +444,11 @@ func (c *Compactor) starting(ctx context.Context) error {
 		return errors.Wrap(err, "failed to start the blocks cleaner")
 	}
 
+	if err := services.StartAndAwaitRunning(ctx, c.deletedSeriesCleaner); err != nil {
+		c.ringSubservices.StopAsync()
+		return errors.Wrap(err, "failed to start the deleted series cleaner")
+	}
+
 	return nil
 }
 
@@ -432,6 +456,7 @@ func (c *Compactor) stopping(_ error) error {
 	ctx := context.Background()
 
 	services.StopAndAwaitTerminated(ctx, c.blocksCleaner) //nolint:errcheck
+	services.StopAndAwaitTerminated(ctx, c.deletedSeriesCleaner)
 	if c.ringSubservices != nil {
 		return services.StopManagerAndAwaitStopped(ctx, c.ringSubservices)
 	}

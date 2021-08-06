@@ -598,6 +598,7 @@ github.com/thanos-io/thanos/pkg/cache
 github.com/thanos-io/thanos/pkg/cacheutil
 github.com/thanos-io/thanos/pkg/compact
 github.com/thanos-io/thanos/pkg/compact/downsample
+github.com/thanos-io/thanos/pkg/compactv2
 github.com/thanos-io/thanos/pkg/component
 github.com/thanos-io/thanos/pkg/discovery/cache
 github.com/thanos-io/thanos/pkg/discovery/dns
