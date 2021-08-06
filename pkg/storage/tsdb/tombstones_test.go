@@ -6,10 +6,11 @@ import (
 	"path"
 	"testing"
 
-	"github.com/cortexproject/cortex/pkg/storage/bucket"
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/thanos/pkg/objstore"
 	"github.com/weaveworks/common/user"
+
+	"github.com/cortexproject/cortex/pkg/storage/bucket"
 )
 
 func TestTombstones_WritingSameTombstoneTwiceShouldFail(t *testing.T) {
@@ -20,10 +21,10 @@ func TestTombstones_WritingSameTombstoneTwiceShouldFail(t *testing.T) {
 	bkt := objstore.NewInMemBucket()
 
 	ctx := context.Background()
-	ctx = user.InjectOrgID(ctx, "fake")
+	ctx = user.InjectOrgID(ctx, username)
 
 	//create the tombstone
-	tombstone := NewTombstone("fake", 0, 0, 0, 1, []string{"match"}, requestID, StatePending)
+	tombstone := NewTombstone(username, 0, 0, 0, 1, []string{"match"}, requestID, StatePending)
 	err := WriteTombstoneFile(ctx, bkt, username, nil, tombstone)
 	require.NoError(t, err)
 
@@ -105,7 +106,7 @@ func TestTombstonesDeletion(t *testing.T) {
 	require.NoError(t, bkt.Upload(context.Background(), tPendingPath, bytes.NewReader([]byte("data"))))
 	require.NoError(t, bkt.Upload(context.Background(), tProcessedPath, bytes.NewReader([]byte("data"))))
 
-	require.NoError(t, DeleteTombstoneFile(ctx, bkt, nil, tPending))
+	require.NoError(t, DeleteTombstoneFile(ctx, bkt, nil, tPending.UserID, tPending.RequestID, tPending.State))
 
 	// make sure the pending tombstone was deleted
 	exists, _ := bkt.Exists(ctx, tPendingPath)
@@ -164,7 +165,7 @@ func TestGetSingleTombstone(t *testing.T) {
 	require.NoError(t, WriteTombstoneFile(ctx, bkt, username, nil, tPending))
 	require.NoError(t, WriteTombstoneFile(ctx, bkt, username, nil, tProcessed))
 
-	tRetrieved, err := GetDeleteRequestByIdForUser(ctx, bkt, nil, username, requestID)
+	tRetrieved, err := GetDeleteRequestByIDForUser(ctx, bkt, nil, username, requestID)
 	require.NoError(t, err)
 
 	//verify that all the information was read correctly
@@ -178,7 +179,7 @@ func TestGetSingleTombstone(t *testing.T) {
 	require.Equal(t, tProcessed.State, tRetrieved.State)
 
 	// Get single tombstone that doesn't exist should return nil
-	tRetrieved, err = GetDeleteRequestByIdForUser(ctx, bkt, nil, username, "unknownRequestID")
+	tRetrieved, err = GetDeleteRequestByIDForUser(ctx, bkt, nil, username, "unknownRequestID")
 	require.NoError(t, err)
 	require.Nil(t, tRetrieved)
 }
