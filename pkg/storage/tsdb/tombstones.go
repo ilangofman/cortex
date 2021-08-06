@@ -233,7 +233,7 @@ func readTombstoneFile(ctx context.Context, bkt objstore.BucketReader, userID st
 
 	tombstone.State = BlockDeleteRequestState(state)
 
-	tombstone.Matchers, err = parseMatchers(tombstone.Selectors)
+	tombstone.Matchers, err = ParseMatchers(tombstone.Selectors)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to parse tombstone selectors for: %s", tombstonePath)
 	}
@@ -241,7 +241,7 @@ func readTombstoneFile(ctx context.Context, bkt objstore.BucketReader, userID st
 	return tombstone, nil
 }
 
-func parseMatchers(selectors []string) ([]*labels.Matcher, error) {
+func ParseMatchers(selectors []string) ([]*labels.Matcher, error) {
 	// Convert the string selectors to label matchers
 	var m []*labels.Matcher
 
@@ -313,4 +313,16 @@ func (t *Tombstone) GetStateOrder() (int, error) {
 	}
 
 	return -1, ErrInvalidDeletionRequestState
+}
+
+func (t *Tombstone) GetFilename() string {
+	return t.RequestID + "." + string(t.State) + ".json"
+}
+
+func (t *Tombstone) GetCreateTime() time.Time {
+	return time.Unix(t.RequestCreatedAt/1000, 0)
+}
+
+func (t *Tombstone) GetStateTime() time.Time {
+	return time.Unix(t.StateCreatedAt/1000, 0)
 }

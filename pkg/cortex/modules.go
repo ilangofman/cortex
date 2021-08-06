@@ -731,7 +731,7 @@ func (t *Cortex) initAlertManager() (serv services.Service, err error) {
 func (t *Cortex) initCompactor() (serv services.Service, err error) {
 	t.Cfg.Compactor.ShardingRing.ListenPort = t.Cfg.Server.GRPCListenPort
 
-	t.Compactor, err = compactor.NewCompactor(t.Cfg.Compactor, t.Cfg.BlocksStorage, t.Overrides, util_log.Logger, prometheus.DefaultRegisterer)
+	t.Compactor, err = compactor.NewCompactor(t.Cfg.Compactor, t.Cfg.BlocksStorage, t.Overrides, util_log.Logger, prometheus.DefaultRegisterer, t.Cfg.PurgerConfig)
 	if err != nil {
 		return
 	}
@@ -895,7 +895,7 @@ func (t *Cortex) setupModuleManager() error {
 		BlocksPurger:             {Store, API, Overrides},
 		Purger:                   {ChunksPurger, BlocksPurger},
 		TenantFederation:         {Queryable},
-		All:                      {QueryFrontend, Querier, Ingester, Distributor, TableManager, Purger, StoreGateway, Ruler},
+		All:                      {QueryFrontend, Querier, Ingester, Distributor, TableManager, Purger, StoreGateway, Ruler, Compactor},
 	}
 	for mod, targets := range deps {
 		if err := mm.AddDependency(mod, targets...); err != nil {
