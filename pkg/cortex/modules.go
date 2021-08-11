@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/rules"
 	prom_storage "github.com/prometheus/prometheus/storage"
+	"github.com/thanos-io/thanos/pkg/extprom"
 	httpgrpc_server "github.com/weaveworks/common/httpgrpc/server"
 	"github.com/weaveworks/common/server"
 
@@ -42,49 +43,54 @@ import (
 	"github.com/cortexproject/cortex/pkg/ring/kv/memberlist"
 	"github.com/cortexproject/cortex/pkg/ruler"
 	"github.com/cortexproject/cortex/pkg/scheduler"
+	"github.com/cortexproject/cortex/pkg/storage/bucket"
+	cortex_tsdb "github.com/cortexproject/cortex/pkg/storage/tsdb"
+	"github.com/cortexproject/cortex/pkg/storage/tsdb/bucketindex"
 	"github.com/cortexproject/cortex/pkg/storegateway"
 	util_log "github.com/cortexproject/cortex/pkg/util/log"
 	"github.com/cortexproject/cortex/pkg/util/modules"
 	"github.com/cortexproject/cortex/pkg/util/runtimeconfig"
 	"github.com/cortexproject/cortex/pkg/util/services"
+
 	"github.com/cortexproject/cortex/pkg/util/validation"
 )
 
 // The various modules that make up Cortex.
 const (
-	API                      string = "api"
-	Ring                     string = "ring"
-	RuntimeConfig            string = "runtime-config"
-	Overrides                string = "overrides"
-	OverridesExporter        string = "overrides-exporter"
-	Server                   string = "server"
-	Distributor              string = "distributor"
-	DistributorService       string = "distributor-service"
-	Ingester                 string = "ingester"
-	IngesterService          string = "ingester-service"
-	Flusher                  string = "flusher"
-	Querier                  string = "querier"
-	Queryable                string = "queryable"
-	StoreQueryable           string = "store-queryable"
-	QueryFrontend            string = "query-frontend"
-	QueryFrontendTripperware string = "query-frontend-tripperware"
-	Store                    string = "store"
-	DeleteRequestsStore      string = "delete-requests-store"
-	TableManager             string = "table-manager"
-	RulerStorage             string = "ruler-storage"
-	Ruler                    string = "ruler"
-	Configs                  string = "configs"
-	AlertManager             string = "alertmanager"
-	Compactor                string = "compactor"
-	StoreGateway             string = "store-gateway"
-	MemberlistKV             string = "memberlist-kv"
-	ChunksPurger             string = "chunks-purger"
-	BlocksPurger             string = "blocks-purger"
-	TenantDeletion           string = "tenant-deletion"
-	Purger                   string = "purger"
-	QueryScheduler           string = "query-scheduler"
-	TenantFederation         string = "tenant-federation"
-	All                      string = "all"
+	API                       string = "api"
+	Ring                      string = "ring"
+	RuntimeConfig             string = "runtime-config"
+	Overrides                 string = "overrides"
+	OverridesExporter         string = "overrides-exporter"
+	Server                    string = "server"
+	Distributor               string = "distributor"
+	DistributorService        string = "distributor-service"
+	Ingester                  string = "ingester"
+	IngesterService           string = "ingester-service"
+	Flusher                   string = "flusher"
+	Querier                   string = "querier"
+	Queryable                 string = "queryable"
+	StoreQueryable            string = "store-queryable"
+	QueryFrontend             string = "query-frontend"
+	QueryFrontendTripperware  string = "query-frontend-tripperware"
+	Store                     string = "store"
+	DeleteRequestsStore       string = "delete-requests-store"
+	TableManager              string = "table-manager"
+	RulerStorage              string = "ruler-storage"
+	Ruler                     string = "ruler"
+	Configs                   string = "configs"
+	AlertManager              string = "alertmanager"
+	Compactor                 string = "compactor"
+	StoreGateway              string = "store-gateway"
+	MemberlistKV              string = "memberlist-kv"
+	ChunksPurger              string = "chunks-purger"
+	BlocksPurger              string = "blocks-purger"
+	TenantDeletion            string = "tenant-deletion"
+	Purger                    string = "purger"
+	QueryScheduler            string = "query-scheduler"
+	TenantFederation          string = "tenant-federation"
+	BucketIndexCacheNumLoader string = "bucket-index-cache-num-loader"
+	All                       string = "all"
 )
 
 func newDefaultConfig() *Config {
@@ -243,6 +249,39 @@ func (t *Cortex) initTenantFederation() (serv services.Service, err error) {
 	return nil, nil
 }
 
+func (t *Cortex) initBucketIndexCacheNumLoader() (serv services.Service, err error) {
+	if t.Cfg.Storage.Engine != storage.StorageEngineBlocks && !t.Cfg.BlocksStorage.BucketStore.BucketIndex.Enabled {
+		return nil, nil
+	}
+
+	bucketClient, err := bucket.NewClient(context.Background(), t.Cfg.BlocksStorage.Bucket, "query-frontend", util_log.Logger, prometheus.DefaultRegisterer)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create bucket client")
+	}
+
+	// doesn't use chunks, but we pass config for consistency.
+	cachingBucket, err := cortex_tsdb.CreateCachingBucket(t.Cfg.BlocksStorage.BucketStore.ChunksCache, t.Cfg.BlocksStorage.BucketStore.MetadataCache, bucketClient, util_log.Logger, extprom.WrapRegistererWith(prometheus.Labels{"component": "query-frontend"}, prometheus.DefaultRegisterer))
+	if err != nil {
+		return nil, errors.Wrap(err, "create caching bucket")
+	}
+	bucketClient = cachingBucket
+
+	t.BucketIndexCacheNumLoader = querier.NewBucketIndexCacheNumLoader(querier.BucketIndexCacheNumLoaderConfig{
+		IndexLoader: bucketindex.LoaderConfig{
+			CheckInterval:         time.Minute,
+			UpdateOnStaleInterval: t.Cfg.BlocksStorage.BucketStore.SyncInterval,
+			UpdateOnErrorInterval: t.Cfg.BlocksStorage.BucketStore.BucketIndex.UpdateOnErrorInterval,
+			IdleTimeout:           t.Cfg.BlocksStorage.BucketStore.BucketIndex.IdleTimeout,
+		},
+		MaxStalePeriod:           t.Cfg.BlocksStorage.BucketStore.BucketIndex.MaxStalePeriod,
+		IgnoreDeletionMarksDelay: t.Cfg.BlocksStorage.BucketStore.IgnoreDeletionMarksDelay,
+	}, bucketClient, t.Overrides, util_log.Logger, extprom.WrapRegistererWith(prometheus.Labels{"component": "query-frontend"}, prometheus.DefaultRegisterer))
+
+	t.CacheGenNumLoader = t.BucketIndexCacheNumLoader
+
+	return t.BucketIndexCacheNumLoader, nil
+}
+
 // initQuerier registers an internal HTTP router with a Prometheus API backed by the
 // Cortex Queryable. Then it does one of the following:
 //
@@ -302,7 +341,7 @@ func (t *Cortex) initQuerier() (serv services.Service, err error) {
 		t.ExemplarQueryable,
 		t.QuerierEngine,
 		t.Distributor,
-		t.TombstonesLoader,
+		t.CacheGenNumLoader,
 		prometheus.DefaultRegisterer,
 		util_log.Logger,
 	)
@@ -483,7 +522,7 @@ func (t *Cortex) initDeleteRequestsStore() (serv services.Service, err error) {
 	if t.Cfg.Storage.Engine != storage.StorageEngineChunks || !t.Cfg.PurgerConfig.Enable {
 		// until we need to explicitly enable delete series support we need to do create TombstonesLoader without DeleteStore which acts as noop
 		t.TombstonesLoader = purger.NewTombstonesLoader(nil, nil)
-
+		t.CacheGenNumLoader = t.TombstonesLoader
 		return
 	}
 
@@ -501,6 +540,7 @@ func (t *Cortex) initDeleteRequestsStore() (serv services.Service, err error) {
 	}
 
 	t.TombstonesLoader = purger.NewTombstonesLoader(t.DeletesStore, prometheus.DefaultRegisterer)
+	t.CacheGenNumLoader = t.TombstonesLoader
 
 	return
 }
@@ -535,7 +575,7 @@ func (t *Cortex) initQueryFrontendTripperware() (serv services.Service, err erro
 		},
 		t.Cfg.Querier.QueryIngestersWithin,
 		prometheus.DefaultRegisterer,
-		t.TombstonesLoader,
+		t.CacheGenNumLoader,
 	)
 
 	if err != nil {
@@ -847,6 +887,7 @@ func (t *Cortex) setupModuleManager() error {
 	mm.RegisterModule(IngesterService, t.initIngesterService, modules.UserInvisibleModule)
 	mm.RegisterModule(Flusher, t.initFlusher)
 	mm.RegisterModule(Queryable, t.initQueryable, modules.UserInvisibleModule)
+	mm.RegisterModule(BucketIndexCacheNumLoader, t.initBucketIndexCacheNumLoader, modules.UserInvisibleModule)
 	mm.RegisterModule(Querier, t.initQuerier)
 	mm.RegisterModule(StoreQueryable, t.initStoreQueryables, modules.UserInvisibleModule)
 	mm.RegisterModule(QueryFrontendTripperware, t.initQueryFrontendTripperware, modules.UserInvisibleModule)
@@ -882,7 +923,7 @@ func (t *Cortex) setupModuleManager() error {
 		Queryable:                {Overrides, DistributorService, Store, Ring, API, StoreQueryable, MemberlistKV},
 		Querier:                  {TenantFederation},
 		StoreQueryable:           {Overrides, Store, MemberlistKV},
-		QueryFrontendTripperware: {API, Overrides, DeleteRequestsStore},
+		QueryFrontendTripperware: {API, Overrides, DeleteRequestsStore, BucketIndexCacheNumLoader},
 		QueryFrontend:            {QueryFrontendTripperware},
 		QueryScheduler:           {API, Overrides},
 		TableManager:             {API},
@@ -896,7 +937,7 @@ func (t *Cortex) setupModuleManager() error {
 		BlocksPurger:             {Store, API, Overrides},
 		Purger:                   {ChunksPurger, BlocksPurger},
 		TenantFederation:         {Queryable},
-		All:                      {QueryFrontend, Querier, Ingester, Distributor, TableManager, Purger, StoreGateway, Ruler},
+		All:                      {QueryFrontend, Querier, Ingester, Distributor, TableManager, Purger, StoreGateway, Ruler, Compactor},
 	}
 	for mod, targets := range deps {
 		if err := mm.AddDependency(mod, targets...); err != nil {

@@ -328,8 +328,19 @@ func (t *Tombstone) IsOverlappingInterval(minT int64, maxT int64) bool {
 	return t.StartTime <= maxT && minT < t.EndTime
 }
 
+func (t *Tombstone) GetCreateTime() time.Time {
+	return time.Unix(t.RequestCreatedAt/1000, 0)
+}
+
 func (t *Tombstone) GetStateTime() time.Time {
 	return time.Unix(t.StateCreatedAt/1000, 0)
+}
+
+func (t *Tombstone) GetCacheGenNumber() int64 {
+	if t.State == StateCancelled {
+		return t.StateCreatedAt / 1000
+	}
+	return t.RequestCreatedAt / 1000
 }
 
 func isValidDeleteRequestState(state BlockDeleteRequestState) bool {

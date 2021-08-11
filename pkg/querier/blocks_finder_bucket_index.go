@@ -38,6 +38,7 @@ type BucketIndexBlocksFinder struct {
 
 	cfg    BucketIndexBlocksFinderConfig
 	loader *bucketindex.Loader
+	logger log.Logger
 }
 
 func NewBucketIndexBlocksFinder(cfg BucketIndexBlocksFinderConfig, bkt objstore.Bucket, cfgProvider bucket.TenantConfigProvider, logger log.Logger, reg prometheus.Registerer) *BucketIndexBlocksFinder {
@@ -45,6 +46,7 @@ func NewBucketIndexBlocksFinder(cfg BucketIndexBlocksFinderConfig, bkt objstore.
 
 	return &BucketIndexBlocksFinder{
 		cfg:     cfg,
+		logger:  logger,
 		loader:  loader,
 		Service: loader,
 	}

@@ -82,17 +82,18 @@ func (w *Updater) UpdateIndex(ctx context.Context, old *Index) (*Index, map[ulid
 		return nil, nil, err
 	}
 
-	tombstones, err := w.updateSeriesDeletionTombstones(ctx, oldTombstones)
+	tombstones, resultsCacheGen, err := w.updateSeriesDeletionTombstones(ctx, oldTombstones)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	return &Index{
-		Version:            IndexVersion1,
-		Blocks:             blocks,
-		BlockDeletionMarks: blockDeletionMarks,
-		Tombstones:         tombstones,
-		UpdatedAt:          time.Now().Unix(),
+		Version:               IndexVersion1,
+		Blocks:                blocks,
+		BlockDeletionMarks:    blockDeletionMarks,
+		Tombstones:            tombstones,
+		ResultsCacheGenNumber: resultsCacheGen,
+		UpdatedAt:             time.Now().Unix(),
 	}, partials, nil
 }
 
@@ -250,7 +251,8 @@ func (w *Updater) updateBlockDeletionMarkIndexEntry(ctx context.Context, id ulid
 	return BlockDeletionMarkFromThanosMarker(&m), nil
 }
 
-func (w *Updater) updateSeriesDeletionTombstones(ctx context.Context, oldTombstones []*cortex_tsdb.Tombstone) ([]*cortex_tsdb.Tombstone, error) {
+func (w *Updater) updateSeriesDeletionTombstones(ctx context.Context, oldTombstones []*cortex_tsdb.Tombstone) ([]*cortex_tsdb.Tombstone, int64, error) {
+	var resultsCacheGen int64
 	out := make([]*cortex_tsdb.Tombstone, 0, len(oldTombstones))
 	discovered := make(map[string]cortex_tsdb.BlockDeleteRequestState)
 
@@ -284,12 +286,17 @@ func (w *Updater) updateSeriesDeletionTombstones(ctx context.Context, oldTombsto
 	})
 
 	if err != nil {
-		return nil, err
+		return nil, resultsCacheGen, err
 	}
 
 	// Since tombstones are immutable, all tombstones already existing in the index can just be copied.
 	for _, t := range oldTombstones {
 		if state, ok := discovered[t.RequestID]; ok && state == t.State {
+			createTime := t.GetCreateTime()
+			if w.isTombstoneForCacheGenNumber(t) && createTime.Unix() > resultsCacheGen {
+				resultsCacheGen = createTime.Unix()
+			}
+
 			if w.isTombstoneForFiltering(t) {
 				out = append(out, t)
 			}
@@ -311,7 +318,12 @@ func (w *Updater) updateSeriesDeletionTombstones(ctx context.Context, oldTombsto
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, resultsCacheGen, err
+		}
+
+		cacheGenNum := t.GetCacheGenNumber()
+		if w.isTombstoneForCacheGenNumber(t) && cacheGenNum > resultsCacheGen {
+			resultsCacheGen = cacheGenNum
 		}
 
 		if w.isTombstoneForFiltering(t) {
@@ -319,7 +331,7 @@ func (w *Updater) updateSeriesDeletionTombstones(ctx context.Context, oldTombsto
 		}
 	}
 
-	return out, nil
+	return out, resultsCacheGen, nil
 
 }
 
@@ -353,6 +365,25 @@ func (w *Updater) isTombstoneForFiltering(t *cortex_tsdb.Tombstone) bool {
 	filterTimeAfterProcessed := w.bktCfg.SyncInterval + w.blocksDeletionDelay + w.blocksCleanupInterval
 	if t.State == cortex_tsdb.StateProcessed && filterTimeAfterProcessed > time.Since(t.GetStateTime()) {
 		return true
+	}
+
+	return false
+}
+
+func (w *Updater) isTombstoneForCacheGenNumber(t *cortex_tsdb.Tombstone) bool {
+	// The cache generation number is used for invalidating the query results cache.
+	// It is invalidated when a new request is created or a previous has been cancelled.
+	// However, it is only safe to invalidate the cache when all the queriers have the all the updated tombstones.
+	// This can only be guaranteed after the bucket index staleness period has passed after the tombstone is created/cancelled.
+
+	if t.State == cortex_tsdb.StateCancelled {
+		if w.bktCfg.BucketIndex.MaxStalePeriod < time.Since(t.GetStateTime()) {
+			return true
+		}
+	} else {
+		if w.bktCfg.BucketIndex.MaxStalePeriod < time.Since(t.GetCreateTime()) {
+			return true
+		}
 	}
 
 	return false

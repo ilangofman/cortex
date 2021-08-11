@@ -135,6 +135,7 @@ func TestTombstonesLoader(t *testing.T) {
 }
 
 func TestTombstonesLoader_GetCacheGenNumber(t *testing.T) {
+	ctx := context.Background()
 	s := &store{
 		numbers: map[string]*cacheGenNumbers{
 			"tenant-a": {
@@ -192,7 +193,7 @@ func TestTombstonesLoader_GetCacheGenNumber(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.expectedResultsCacheGenNumber, tombstonesLoader.GetResultsCacheGenNumber(tc.tenantIDs))
+			assert.Equal(t, tc.expectedResultsCacheGenNumber, tombstonesLoader.GetResultsCacheGenNumber(ctx, tc.tenantIDs))
 			assert.Equal(t, tc.expectedStoreCacheGenNumber, tombstonesLoader.GetStoreCacheGenNumber(tc.tenantIDs))
 		})
 	}

@@ -41,7 +41,7 @@ var (
 )
 
 type CacheGenNumberLoader interface {
-	GetResultsCacheGenNumber(tenantIDs []string) string
+	GetResultsCacheGenNumber(ctx context.Context, tenantIDs []string) string
 }
 
 // ResultsCacheConfig is the config for the results cache.
@@ -196,7 +196,7 @@ func (s resultsCache) Do(ctx context.Context, r Request) (Response, error) {
 	}
 
 	if s.cacheGenNumberLoader != nil {
-		ctx = cache.InjectCacheGenNumber(ctx, s.cacheGenNumberLoader.GetResultsCacheGenNumber(tenantIDs))
+		ctx = cache.InjectCacheGenNumber(ctx, s.cacheGenNumberLoader.GetResultsCacheGenNumber(ctx, tenantIDs))
 	}
 
 	var (
