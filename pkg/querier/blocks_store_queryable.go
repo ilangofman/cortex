@@ -79,7 +79,7 @@ type BlocksFinder interface {
 	// and maxT (milliseconds, both included). Returned blocks are sorted by MaxTime descending.
 	GetBlocks(ctx context.Context, userID string, minT, maxT int64) (bucketindex.Blocks, map[ulid.ULID]*bucketindex.BlockDeletionMark, error)
 
-	// // GetTombstones returns all the tombstones that are currently required for filtering deleted series
+	// GetTombstones returns all the tombstones that are currently required for filtering deleted series.
 	GetTombstones(ctx context.Context, userID string, minT, maxT int64) (*purger.TombstonesSet, error)
 }
 

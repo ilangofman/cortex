@@ -254,9 +254,9 @@ func (w *Updater) updateSeriesDeletionTombstones(ctx context.Context, oldTombsto
 	out := make([]*cortex_tsdb.Tombstone, 0, len(oldTombstones))
 	discovered := make(map[string]cortex_tsdb.BlockDeleteRequestState)
 
-	err := w.bkt.Iter(ctx, "tombstones/", func(s string) error {
-		tName := filepath.Base(s)
-		requestID, state, err := cortex_tsdb.ParseTombstonePath(tName)
+	err := w.bkt.Iter(ctx, cortex_tsdb.TombstonePath, func(s string) error {
+		tombstoneName := filepath.Base(s)
+		requestID, state, err := cortex_tsdb.GetTombstoneStateAndRequestIDFromPath(tombstoneName)
 		if err != nil {
 			return err
 		}

@@ -46,15 +46,15 @@ func TestBlocksStoreQuerier_Select(t *testing.T) {
 	)
 
 	var (
-		block1           = ulid.MustNew(1, nil)
-		block2           = ulid.MustNew(2, nil)
-		block3           = ulid.MustNew(3, nil)
-		block4           = ulid.MustNew(4, nil)
-		metricNameLabel  = labels.Label{Name: labels.MetricName, Value: metricName}
-		series1Label     = labels.Label{Name: "series", Value: "1"}
-		series2Label     = labels.Label{Name: "series", Value: "2"}
-		noOpQueryLimiter = limiter.NewQueryLimiter(0, 0, 0)
-    metricNameMatcher = labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, metricName)
+		block1            = ulid.MustNew(1, nil)
+		block2            = ulid.MustNew(2, nil)
+		block3            = ulid.MustNew(3, nil)
+		block4            = ulid.MustNew(4, nil)
+		metricNameLabel   = labels.Label{Name: labels.MetricName, Value: metricName}
+		series1Label      = labels.Label{Name: "series", Value: "1"}
+		series2Label      = labels.Label{Name: "series", Value: "2"}
+		noOpQueryLimiter  = limiter.NewQueryLimiter(0, 0, 0)
+		metricNameMatcher = labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, metricName)
 		seriesMatcher2    = labels.MustNewMatcher(labels.MatchEqual, "series", "2")
 	)
 
