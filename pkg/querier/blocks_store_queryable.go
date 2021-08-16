@@ -31,6 +31,7 @@ import (
 	"github.com/cortexproject/cortex/pkg/chunk/purger"
 	"github.com/cortexproject/cortex/pkg/cortexpb"
 	"github.com/cortexproject/cortex/pkg/querier/series"
+	"github.com/cortexproject/cortex/pkg/querier/stats"
 	"github.com/cortexproject/cortex/pkg/ring"
 	"github.com/cortexproject/cortex/pkg/ring/kv"
 	"github.com/cortexproject/cortex/pkg/storage/bucket"
@@ -140,7 +141,15 @@ type BlocksStoreQueryable struct {
 	subservicesWatcher *services.FailureWatcher
 }
 
-func NewBlocksStoreQueryable(stores BlocksStoreSet, finder BlocksFinder, consistency *BlocksConsistencyChecker, limits BlocksStoreLimits, queryStoreAfter time.Duration, logger log.Logger, reg prometheus.Registerer) (*BlocksStoreQueryable, error) {
+func NewBlocksStoreQueryable(
+	stores BlocksStoreSet,
+	finder BlocksFinder,
+	consistency *BlocksConsistencyChecker,
+	limits BlocksStoreLimits,
+	queryStoreAfter time.Duration,
+	logger log.Logger,
+	reg prometheus.Registerer,
+) (*BlocksStoreQueryable, error) {
 	manager, err := services.NewManager(stores, finder)
 	if err != nil {
 		return nil, errors.Wrap(err, "register blocks storage queryable subservices")
@@ -321,20 +330,21 @@ func (q *blocksStoreQuerier) Select(_ bool, sp *storage.SelectHints, matchers ..
 	return q.selectSorted(sp, matchers...)
 }
 
-func (q *blocksStoreQuerier) LabelNames() ([]string, storage.Warnings, error) {
+func (q *blocksStoreQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
 	spanLog, spanCtx := spanlogger.New(q.ctx, "blocksStoreQuerier.LabelNames")
 	defer spanLog.Span.Finish()
 
 	minT, maxT := q.minT, q.maxT
 
 	var (
-		resMtx      sync.Mutex
-		resNameSets = [][]string{}
-		resWarnings = storage.Warnings(nil)
+		resMtx            sync.Mutex
+		resNameSets       = [][]string{}
+		resWarnings       = storage.Warnings(nil)
+		convertedMatchers = convertMatchersToLabelMatcher(matchers)
 	)
 
 	queryFunc := func(clients map[BlocksStoreClient][]ulid.ULID, minT, maxT int64) ([]ulid.ULID, error) {
-		nameSets, warnings, queriedBlocks, err := q.fetchLabelNamesFromStore(spanCtx, clients, minT, maxT)
+		nameSets, warnings, queriedBlocks, err := q.fetchLabelNamesFromStore(spanCtx, clients, minT, maxT, convertedMatchers)
 		if err != nil {
 			return nil, err
 		}
@@ -580,6 +590,7 @@ func (q *blocksStoreQuerier) fetchSeriesFromStores(
 		numChunks     = atomic.NewInt32(0)
 		spanLog       = spanlogger.FromContext(ctx)
 		queryLimiter  = limiter.QueryLimiterFromContextWithFallback(ctx)
+		reqStats      = stats.FromContext(ctx)
 	)
 
 	// Concurrently fetch series from all clients.
@@ -641,10 +652,7 @@ func (q *blocksStoreQuerier) fetchSeriesFromStores(
 							return validation.LimitError(fmt.Sprintf(errMaxChunksPerQueryLimit, util.LabelMatchersToString(matchers), maxChunksLimit))
 						}
 					}
-					chunksSize := 0
-					for _, c := range s.Chunks {
-						chunksSize += c.Size()
-					}
+					chunksSize := countChunkBytes(s)
 					if chunkBytesLimitErr := queryLimiter.AddChunkBytes(chunksSize); chunkBytesLimitErr != nil {
 						return validation.LimitError(chunkBytesLimitErr.Error())
 					}
@@ -672,10 +680,16 @@ func (q *blocksStoreQuerier) fetchSeriesFromStores(
 				}
 			}
 
+			numSeries := len(mySeries)
+			chunkBytes := countChunkBytes(mySeries...)
+
+			reqStats.AddFetchedSeries(uint64(numSeries))
+			reqStats.AddFetchedChunkBytes(uint64(chunkBytes))
+
 			level.Debug(spanLog).Log("msg", "received series from store-gateway",
 				"instance", c.RemoteAddress(),
-				"num series", len(mySeries),
-				"bytes series", countSeriesBytes(mySeries),
+				"fetched series", numSeries,
+				"fetched chunk bytes", chunkBytes,
 				"requested blocks", strings.Join(convertULIDsToString(blockIDs), " "),
 				"queried blocks", strings.Join(convertULIDsToString(myQueriedBlocks), " "))
 
@@ -703,6 +717,7 @@ func (q *blocksStoreQuerier) fetchLabelNamesFromStore(
 	clients map[BlocksStoreClient][]ulid.ULID,
 	minT int64,
 	maxT int64,
+	matchers []storepb.LabelMatcher,
 ) ([][]string, storage.Warnings, []ulid.ULID, error) {
 	var (
 		reqCtx        = grpc_metadata.AppendToOutgoingContext(ctx, cortex_tsdb.TenantIDExternalLabel, q.userID)
@@ -721,7 +736,7 @@ func (q *blocksStoreQuerier) fetchLabelNamesFromStore(
 		blockIDs := blockIDs
 
 		g.Go(func() error {
-			req, err := createLabelNamesRequest(minT, maxT, blockIDs)
+			req, err := createLabelNamesRequest(minT, maxT, blockIDs, matchers)
 			if err != nil {
 				return errors.Wrapf(err, "failed to create label names request")
 			}
@@ -880,10 +895,11 @@ func createSeriesRequest(minT, maxT int64, matchers []storepb.LabelMatcher, skip
 	}, nil
 }
 
-func createLabelNamesRequest(minT, maxT int64, blockIDs []ulid.ULID) (*storepb.LabelNamesRequest, error) {
+func createLabelNamesRequest(minT, maxT int64, blockIDs []ulid.ULID, matchers []storepb.LabelMatcher) (*storepb.LabelNamesRequest, error) {
 	req := &storepb.LabelNamesRequest{
-		Start: minT,
-		End:   maxT,
+		Start:    minT,
+		End:      maxT,
+		Matchers: matchers,
 	}
 
 	// Selectively query only specific blocks.
@@ -959,12 +975,11 @@ func convertBlockHintsToULIDs(hints []hintspb.Block) ([]ulid.ULID, error) {
 	return res, nil
 }
 
-func countSeriesBytes(series []*storepb.Series) (count uint64) {
+// countChunkBytes returns the size of the chunks making up the provided series in bytes
+func countChunkBytes(series ...*storepb.Series) (count int) {
 	for _, s := range series {
 		for _, c := range s.Chunks {
-			if c.Raw != nil {
-				count += uint64(len(c.Raw.Data))
-			}
+			count += c.Size()
 		}
 	}
 
