@@ -66,7 +66,7 @@ func TestUpdater_UpdateIndex(t *testing.T) {
 
 	// Hard delete a block and tombstone and update the index.
 	require.NoError(t, block.Delete(ctx, log.NewNopLogger(), bucket.NewUserBucketClient(userID, bkt, nil), block2.ULID))
-	require.NoError(t, cortex_tsdb.DeleteTombstoneFile(ctx, bkt, nil, userID, tombstone1.RequestID, tombstone1.State))
+	require.NoError(t, w.tManager.DeleteTombstoneFile(ctx, tombstone1.RequestID, tombstone1.State))
 
 	returnedIdx, _, err = w.UpdateIndex(ctx, returnedIdx)
 	require.NoError(t, err)
