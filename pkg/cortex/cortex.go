@@ -329,7 +329,7 @@ type Cortex struct {
 	ExemplarQueryable         prom_storage.ExemplarQueryable
 	QuerierEngine             *promql.Engine
 	QueryFrontendTripperware  queryrange.Tripperware
-	BucketIndexCacheNumLoader *querier.BucketIndexCacheNumLoader
+	BucketIndexCacheNumLoader *queryrange.BucketIndexCacheNumLoader
 	CacheGenNumLoader         queryrange.CacheGenNumberLoader
 
 	Ruler        *ruler.Ruler

@@ -346,6 +346,13 @@ func (tl *TombstonesLoader) getCacheGenNumbers(userID string) *cacheGenNumbers {
 	return genNumbers
 }
 
+func (tl *TombstonesLoader) ShouldCompareWithQueriersResponse() bool {
+	// Using the chunks storage, the query results cache compares the frontend cache gen num to each of
+	// cache gen nums received from the queriers. If they match, then the response is cached, otherwise
+	// the response is not cached.
+	return true
+}
+
 // GetDeletedIntervals returns non-overlapping, sorted  deleted intervals.
 func (ts TombstonesSet) GetDeletedIntervals(lbls labels.Labels, from, to model.Time) []model.Interval {
 	if len(ts.tombstones) == 0 || to < ts.oldestTombstoneStart || from > ts.newestTombstoneEnd {

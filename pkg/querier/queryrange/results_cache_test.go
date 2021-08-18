@@ -15,6 +15,7 @@ import (
 	"github.com/weaveworks/common/user"
 
 	"github.com/cortexproject/cortex/pkg/chunk/cache"
+	"github.com/cortexproject/cortex/pkg/chunk/storage"
 	"github.com/cortexproject/cortex/pkg/cortexpb"
 	"github.com/cortexproject/cortex/pkg/util/flagext"
 )
@@ -109,12 +110,16 @@ func mkExtentWithStep(start, end, step int64) Extent {
 
 func TestShouldCache(t *testing.T) {
 	maxCacheTime := int64(150 * 1000)
-	c := &resultsCache{logger: log.NewNopLogger(), cacheGenNumberLoader: newMockCacheGenNumberLoader()}
+
+	cChunksImplementation := &resultsCache{logger: log.NewNopLogger(), cacheGenNumberLoader: newMockCacheGenNumberLoader(storage.StorageEngineChunks)}
+	cBlocksImplementation := &resultsCache{logger: log.NewNopLogger(), cacheGenNumberLoader: newMockCacheGenNumberLoader(storage.StorageEngineBlocks)}
+
 	for _, tc := range []struct {
 		name                   string
 		request                Request
 		input                  Response
 		cacheGenNumberToInject string
+		chunksEngineOnly       bool
 		expected               bool
 	}{
 		// Tests only for cacheControlHeader
@@ -206,7 +211,9 @@ func TestShouldCache(t *testing.T) {
 				},
 			}),
 			cacheGenNumberToInject: "1",
-			expected:               false,
+			// The blocks engine implementation doesn't need to compare the gen numbers from the queriers.
+			chunksEngineOnly: true,
+			expected:         false,
 		},
 		{
 			name:    "cacheGenNumber set in header but not in store",
@@ -219,7 +226,8 @@ func TestShouldCache(t *testing.T) {
 					},
 				},
 			}),
-			expected: false,
+			chunksEngineOnly: true,
+			expected:         false,
 		},
 		{
 			name:    "cacheGenNumber in header and store are the same",
@@ -246,6 +254,7 @@ func TestShouldCache(t *testing.T) {
 					},
 				},
 			}),
+			chunksEngineOnly:       true,
 			cacheGenNumberToInject: "1",
 			expected:               false,
 		},
@@ -382,8 +391,15 @@ func TestShouldCache(t *testing.T) {
 		{
 			t.Run(tc.name, func(t *testing.T) {
 				ctx := cache.InjectCacheGenNumber(context.Background(), tc.cacheGenNumberToInject)
-				ret := c.shouldCacheResponse(ctx, tc.request, tc.input, maxCacheTime)
+				ret := cChunksImplementation.shouldCacheResponse(ctx, tc.request, tc.input, maxCacheTime)
 				require.Equal(t, tc.expected, ret)
+
+				if tc.chunksEngineOnly {
+					return
+				}
+				ret = cBlocksImplementation.shouldCacheResponse(ctx, tc.request, tc.input, maxCacheTime)
+				require.Equal(t, tc.expected, ret)
+
 			})
 		}
 	}
@@ -1018,17 +1034,84 @@ func TestResultsCacheShouldCacheFunc(t *testing.T) {
 	}
 }
 
+func TestResultsCacheInvalidation_BlocksEngine(t *testing.T) {
+	calls := 0
+	cfg := ResultsCacheConfig{
+		CacheConfig: cache.Config{
+			Cache: cache.NewMockCache(),
+		},
+	}
+
+	cacheGenNumLoader := newMockCacheGenNumberLoader(storage.StorageEngineBlocks)
+	cacheGenNumLoader.CachGenNumber = "1"
+
+	rcm, _, err := NewResultsCacheMiddleware(
+		log.NewNopLogger(),
+		cfg,
+		constSplitter(day),
+		mockLimits{},
+		PrometheusCodec,
+		PrometheusResponseExtractor{},
+		&cacheGenNumLoader,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	rc := rcm.Wrap(HandlerFunc(func(_ context.Context, req Request) (Response, error) {
+		calls++
+		return parsedResponse, nil
+	}))
+	ctx := user.InjectOrgID(context.Background(), "1")
+
+	resp, err := rc.Do(ctx, parsedRequest)
+	require.NoError(t, err)
+	require.Equal(t, 1, calls)
+	require.Equal(t, parsedResponse, resp)
+
+	// Doing same request again shouldn't change anything.
+	resp, err = rc.Do(ctx, parsedRequest)
+	require.NoError(t, err)
+	require.Equal(t, 1, calls)
+	require.Equal(t, parsedResponse, resp)
+
+	// Update the cache generation numbers.
+	cacheGenNumLoader.CachGenNumber = "2"
+
+	resp, err = rc.Do(ctx, parsedRequest)
+	require.NoError(t, err)
+	require.Equal(t, 2, calls)
+	require.Equal(t, parsedResponse, resp)
+
+	// Since this is the second time doing the query with the new cache num,
+	// it shouldn't increase the number of calls.
+	resp, err = rc.Do(ctx, parsedRequest)
+	require.NoError(t, err)
+	require.Equal(t, 2, calls)
+	require.Equal(t, parsedResponse, resp)
+
+}
+
 func toMs(t time.Duration) int64 {
 	return int64(t / time.Millisecond)
 }
 
 type mockCacheGenNumberLoader struct {
+	CachGenNumber string
+	storageEngine string
 }
 
-func newMockCacheGenNumberLoader() CacheGenNumberLoader {
-	return mockCacheGenNumberLoader{}
+func newMockCacheGenNumberLoader(storeEngine string) mockCacheGenNumberLoader {
+	return mockCacheGenNumberLoader{CachGenNumber: "", storageEngine: storeEngine}
 }
 
-func (mockCacheGenNumberLoader) GetResultsCacheGenNumber(_ context.Context, tenantIDs []string) string {
-	return ""
+func (m mockCacheGenNumberLoader) GetResultsCacheGenNumber(_ context.Context, tenantIDs []string) string {
+	return m.CachGenNumber
+}
+
+func (m mockCacheGenNumberLoader) ShouldCompareWithQueriersResponse() bool {
+	if m.storageEngine == storage.StorageEngineBlocks {
+		return false
+	}
+	return true
 }

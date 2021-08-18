@@ -16,7 +16,6 @@ import (
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/rules"
 	prom_storage "github.com/prometheus/prometheus/storage"
-	"github.com/thanos-io/thanos/pkg/extprom"
 	httpgrpc_server "github.com/weaveworks/common/httpgrpc/server"
 	"github.com/weaveworks/common/server"
 
@@ -250,32 +249,33 @@ func (t *Cortex) initTenantFederation() (serv services.Service, err error) {
 }
 
 func (t *Cortex) initBucketIndexCacheNumLoader() (serv services.Service, err error) {
-	if t.Cfg.Storage.Engine != storage.StorageEngineBlocks && !t.Cfg.BlocksStorage.BucketStore.BucketIndex.Enabled {
+	if t.Cfg.Storage.Engine != storage.StorageEngineBlocks || !t.Cfg.BlocksStorage.BucketStore.BucketIndex.Enabled || !t.Cfg.QueryRange.CacheResults {
+		t.CacheGenNumLoader = purger.NewTombstonesLoader(nil, nil)
 		return nil, nil
 	}
 
-	bucketClient, err := bucket.NewClient(context.Background(), t.Cfg.BlocksStorage.Bucket, "query-frontend", util_log.Logger, prometheus.DefaultRegisterer)
+	reg := prometheus.DefaultRegisterer
+	bucketClient, err := bucket.NewClient(context.Background(), t.Cfg.BlocksStorage.Bucket, "query-front-end", util_log.Logger, reg)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create bucket client")
 	}
 
 	// doesn't use chunks, but we pass config for consistency.
-	cachingBucket, err := cortex_tsdb.CreateCachingBucket(t.Cfg.BlocksStorage.BucketStore.ChunksCache, t.Cfg.BlocksStorage.BucketStore.MetadataCache, bucketClient, util_log.Logger, extprom.WrapRegistererWith(prometheus.Labels{"component": "query-frontend"}, prometheus.DefaultRegisterer))
+	cachingBucket, err := cortex_tsdb.CreateCachingBucket(t.Cfg.BlocksStorage.BucketStore.ChunksCache, t.Cfg.BlocksStorage.BucketStore.MetadataCache, bucketClient, util_log.Logger, prometheus.WrapRegistererWith(prometheus.Labels{"component": "query-frontend"}, prometheus.DefaultRegisterer))
 	if err != nil {
 		return nil, errors.Wrap(err, "create caching bucket")
 	}
 	bucketClient = cachingBucket
 
-	t.BucketIndexCacheNumLoader = querier.NewBucketIndexCacheNumLoader(querier.BucketIndexCacheNumLoaderConfig{
+	t.BucketIndexCacheNumLoader = queryrange.NewBucketIndexCacheNumLoader(queryrange.BucketIndexCacheNumLoaderConfig{
 		IndexLoader: bucketindex.LoaderConfig{
 			CheckInterval:         time.Minute,
 			UpdateOnStaleInterval: t.Cfg.BlocksStorage.BucketStore.SyncInterval,
 			UpdateOnErrorInterval: t.Cfg.BlocksStorage.BucketStore.BucketIndex.UpdateOnErrorInterval,
 			IdleTimeout:           t.Cfg.BlocksStorage.BucketStore.BucketIndex.IdleTimeout,
 		},
-		MaxStalePeriod:           t.Cfg.BlocksStorage.BucketStore.BucketIndex.MaxStalePeriod,
-		IgnoreDeletionMarksDelay: t.Cfg.BlocksStorage.BucketStore.IgnoreDeletionMarksDelay,
-	}, bucketClient, t.Overrides, util_log.Logger, extprom.WrapRegistererWith(prometheus.Labels{"component": "query-frontend"}, prometheus.DefaultRegisterer))
+		MaxStalePeriod: t.Cfg.BlocksStorage.BucketStore.BucketIndex.MaxStalePeriod,
+	}, bucketClient, t.Overrides, util_log.Logger, prometheus.WrapRegistererWith(prometheus.Labels{"component": "query-frontend"}, reg))
 
 	t.CacheGenNumLoader = t.BucketIndexCacheNumLoader
 
@@ -341,7 +341,7 @@ func (t *Cortex) initQuerier() (serv services.Service, err error) {
 		t.ExemplarQueryable,
 		t.QuerierEngine,
 		t.Distributor,
-		t.CacheGenNumLoader,
+		t.TombstonesLoader,
 		prometheus.DefaultRegisterer,
 		util_log.Logger,
 	)
@@ -522,7 +522,6 @@ func (t *Cortex) initDeleteRequestsStore() (serv services.Service, err error) {
 	if t.Cfg.Storage.Engine != storage.StorageEngineChunks || !t.Cfg.PurgerConfig.Enable {
 		// until we need to explicitly enable delete series support we need to do create TombstonesLoader without DeleteStore which acts as noop
 		t.TombstonesLoader = purger.NewTombstonesLoader(nil, nil)
-		t.CacheGenNumLoader = t.TombstonesLoader
 		return
 	}
 

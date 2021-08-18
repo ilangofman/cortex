@@ -42,6 +42,20 @@ var (
 
 type CacheGenNumberLoader interface {
 	GetResultsCacheGenNumber(ctx context.Context, tenantIDs []string) string
+
+	// This is to handle the different implementions of cache invalidation for the 2 storage engines.
+	// In the chunks implementation: each of the queriers response is injected with a gen number. The response will
+	// only be cached if all the queriers respond with the same cache gen number, which matches the gen number
+	// loaded from the frontend's tombstone loader.
+
+	// With the blocks implementation, that method could lead to a long period of time without caching the response because
+	// it could take time to load the tombstones to the bucket index and then the time it takes for the queriers to read the updated bucket index.
+	// To prevent not caching results for a while:
+	// The frontend loads the cache generation number from the bucket index. The bucket index will only update the cache generation number
+	// once it is guaranteed that all the queriers have loaded the new tombstones and the cache can be safley invalidated.
+	// So there is no need to compare the generation number with the queriers response as all queriers should have loaded the updated tombstones
+	// by the time that the cache gen num was updated in the bucket index.
+	ShouldCompareWithQueriersResponse() bool
 }
 
 // ResultsCacheConfig is the config for the results cache.
@@ -243,7 +257,7 @@ func (s resultsCache) shouldCacheResponse(ctx context.Context, req Request, r Re
 		return false
 	}
 
-	if s.cacheGenNumberLoader == nil {
+	if s.cacheGenNumberLoader == nil || !s.cacheGenNumberLoader.ShouldCompareWithQueriersResponse() {
 		return true
 	}
 

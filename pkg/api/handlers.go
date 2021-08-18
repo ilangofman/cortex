@@ -22,8 +22,8 @@ import (
 	"github.com/weaveworks/common/instrument"
 	"github.com/weaveworks/common/middleware"
 
+	"github.com/cortexproject/cortex/pkg/chunk/purger"
 	"github.com/cortexproject/cortex/pkg/querier"
-	"github.com/cortexproject/cortex/pkg/querier/queryrange"
 	"github.com/cortexproject/cortex/pkg/querier/stats"
 	"github.com/cortexproject/cortex/pkg/util"
 )
@@ -160,7 +160,7 @@ func NewQuerierHandler(
 	exemplarQueryable storage.ExemplarQueryable,
 	engine *promql.Engine,
 	distributor Distributor,
-	cacheGenNumLoader queryrange.CacheGenNumberLoader,
+	tombstonesLoader *purger.TombstonesLoader,
 	reg prometheus.Registerer,
 	logger log.Logger,
 ) http.Handler {
@@ -228,7 +228,7 @@ func NewQuerierHandler(
 		ResponseBodySize: sentMessageSize,
 		InflightRequests: inflightRequests,
 	}
-	cacheGenHeaderMiddleware := getHTTPCacheGenNumberHeaderSetterMiddleware(cacheGenNumLoader)
+	cacheGenHeaderMiddleware := getHTTPCacheGenNumberHeaderSetterMiddleware(tombstonesLoader)
 	middlewares := middleware.Merge(inst, cacheGenHeaderMiddleware)
 	router.Use(middlewares.Wrap)
 

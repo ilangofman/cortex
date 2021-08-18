@@ -1,4 +1,4 @@
-package querier
+package queryrange
 
 import (
 	"context"
@@ -18,12 +18,12 @@ import (
 
 var (
 	errBucketIndexCacheNumLoaderNotRunning = errors.New("bucket index blocks finder is not running")
+	errBucketIndexTooOld                   = errors.New("bucket index is too old and the last time it was updated exceeds the allowed max staleness")
 )
 
 type BucketIndexCacheNumLoaderConfig struct {
-	IndexLoader              bucketindex.LoaderConfig
-	MaxStalePeriod           time.Duration
-	IgnoreDeletionMarksDelay time.Duration
+	IndexLoader    bucketindex.LoaderConfig
+	MaxStalePeriod time.Duration
 }
 
 // BucketIndexCacheNumLoader implements BlocksFinder interface and find blocks in the bucket
@@ -49,7 +49,6 @@ func NewBucketIndexCacheNumLoader(cfg BucketIndexCacheNumLoaderConfig, bkt objst
 
 func (f *BucketIndexCacheNumLoader) GetResultsCacheGenNumber(ctx context.Context, tenantIDs []string) string {
 	var result string
-
 	if f.State() != services.Running {
 		level.Error(f.logger).Log("msg", "error getting resultsCacheGenNumber", "err", errBucketIndexCacheNumLoaderNotRunning)
 		return result
@@ -114,4 +113,12 @@ func (f *BucketIndexCacheNumLoader) getCacheGenNumber(ctx context.Context, userI
 
 	return idx.ResultsCacheGenNumber, nil
 
+}
+
+func (f *BucketIndexCacheNumLoader) ShouldCompareWithQueriersResponse() bool {
+	// In the blocks implementation, the results cache doesn't need to make sure all the queriers have the newest tombstones
+	// because the bucket index is only updated with the new cache gen number once it is guaranteed that the queriers have
+	// loaded the new tombstones. If true is returned, it is possible that the query responses are not going to be cached until
+	// all queriers have loaded the tombstones from the bucket index. This could take a while and would not be ideal.
+	return false
 }
