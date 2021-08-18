@@ -51,7 +51,7 @@ func TestReadIndex_ShouldReturnTheParsedIndexOnSuccess(t *testing.T) {
 	testutil.MockStorageDeletionMark(t, bkt, userID, testutil.MockStorageBlock(t, bkt, userID, 30, 40))
 
 	// Write the index.
-	u := NewUpdater(bkt, userID, nil, logger)
+	u := NewUpdater(bkt, userID, nil, blockDeletionDelay, blocksCleanupInterval, newMockBucketStoreCfg(), logger)
 	expectedIdx, _, err := u.UpdateIndex(ctx, nil)
 	require.NoError(t, err)
 	require.NoError(t, WriteIndex(ctx, bkt, userID, nil, expectedIdx))
@@ -88,7 +88,7 @@ func BenchmarkReadIndex(b *testing.B) {
 	}
 
 	// Write the index.
-	u := NewUpdater(bkt, userID, nil, logger)
+	u := NewUpdater(bkt, userID, nil, blockDeletionDelay, blocksCleanupInterval, newMockBucketStoreCfg(), logger)
 	idx, _, err := u.UpdateIndex(ctx, nil)
 	require.NoError(b, err)
 	require.NoError(b, WriteIndex(ctx, bkt, userID, nil, idx))

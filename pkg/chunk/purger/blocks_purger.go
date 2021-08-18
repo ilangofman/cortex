@@ -158,7 +158,7 @@ func (api *BlocksPurgerAPI) GetAllDeleteRequestsHandler(w http.ResponseWriter, r
 		return
 	}
 	tManager := cortex_tsdb.NewTombstoneManager(api.bucketClient, userID, api.cfgProvider, api.logger)
-	deleteRequests, err := tManager.GetAllDeleteRequestsForUser(ctx)
+	deleteRequests, err := tManager.GetAllDeleteRequestsForUser(ctx, nil)
 	if err != nil {
 		level.Error(util_log.Logger).Log("msg", "error getting delete requests from the block store", "err", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)

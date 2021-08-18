@@ -40,6 +40,7 @@ type BlocksCleaner struct {
 	logger       log.Logger
 	bucketClient objstore.Bucket
 	usersScanner *cortex_tsdb.UsersScanner
+	bucketCfg    cortex_tsdb.BucketStoreConfig
 
 	// Keep track of the last owned users.
 	lastOwnedUsers []string
@@ -58,10 +59,11 @@ type BlocksCleaner struct {
 	tenantBucketIndexLastUpdate *prometheus.GaugeVec
 }
 
-func NewBlocksCleaner(cfg BlocksCleanerConfig, bucketClient objstore.Bucket, usersScanner *cortex_tsdb.UsersScanner, cfgProvider ConfigProvider, logger log.Logger, reg prometheus.Registerer) *BlocksCleaner {
+func NewBlocksCleaner(cfg BlocksCleanerConfig, bucketClient objstore.Bucket, usersScanner *cortex_tsdb.UsersScanner, cfgProvider ConfigProvider, bktCfg cortex_tsdb.BucketStoreConfig, logger log.Logger, reg prometheus.Registerer) *BlocksCleaner {
 	c := &BlocksCleaner{
 		cfg:          cfg,
 		bucketClient: bucketClient,
+		bucketCfg:    bktCfg,
 		usersScanner: usersScanner,
 		cfgProvider:  cfgProvider,
 		logger:       log.With(logger, "component", "cleaner"),
@@ -329,7 +331,7 @@ func (c *BlocksCleaner) cleanUser(ctx context.Context, userID string, firstRun b
 	}
 
 	// Generate an updated in-memory version of the bucket index.
-	w := bucketindex.NewUpdater(c.bucketClient, userID, c.cfgProvider, c.logger)
+	w := bucketindex.NewUpdater(c.bucketClient, userID, c.cfgProvider, c.cfg.DeletionDelay, c.cfg.CleanupInterval, c.bucketCfg, c.logger)
 	idx, partials, err := w.UpdateIndex(ctx, idx)
 	if err != nil {
 		return err

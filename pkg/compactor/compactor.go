@@ -360,7 +360,7 @@ func (c *Compactor) starting(ctx context.Context) error {
 		CleanupConcurrency:                 c.compactorCfg.CleanupConcurrency,
 		BlockDeletionMarksMigrationEnabled: c.compactorCfg.BlockDeletionMarksMigrationEnabled,
 		TenantCleanupDelay:                 c.compactorCfg.TenantCleanupDelay,
-	}, c.bucketClient, c.usersScanner, c.cfgProvider, c.parentLogger, c.registerer)
+	}, c.bucketClient, c.usersScanner, c.cfgProvider, c.storageCfg.BucketStore, c.parentLogger, c.registerer)
 
 	// Initialize the compactors ring if sharding is enabled.
 	if c.compactorCfg.ShardingEnabled {

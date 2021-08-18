@@ -143,27 +143,37 @@ func (m *TombstoneManager) GetDeleteRequestByIDForUser(ctx context.Context, requ
 
 }
 
-func (m *TombstoneManager) GetAllDeleteRequestsForUser(ctx context.Context) ([]*Tombstone, error) {
+func (m *TombstoneManager) GetAllDeleteRequestsForUser(ctx context.Context, prevLoadedTombstones []*Tombstone) ([]*Tombstone, error) {
 	// add all the tombstones to a map and check for duplicates,
 	// if a key exists with the same request ID (but two different states)
-	tombstoneMap := make(map[string]*Tombstone)
+	out := make([]*Tombstone, 0, len(prevLoadedTombstones))
+	discovered := make(map[string]BlockDeleteRequestState)
+
 	err := m.bkt.Iter(ctx, TombstonePath, func(s string) error {
-		t, err := m.ReadTombstoneFile(ctx, s)
+		tombstoneName := filepath.Base(s)
+		requestID, state, err := GetTombstoneStateAndRequestIDFromPath(tombstoneName)
 		if err != nil {
 			return err
 		}
 
-		if _, exists := tombstoneMap[t.RequestID]; !exists {
-			tombstoneMap[t.RequestID] = t
+		if prevState, exists := discovered[requestID]; !exists {
+			discovered[requestID] = state
 		} else {
 			// if there is more than one tombstone for a given request,
-			// we only want to return the latest state. The older file
-			// will be cleaned by the compactor
-			newT, err := m.getLatestTombstateByState(t, tombstoneMap[t.RequestID])
+			// we only want to keep track of the one with the latest state
+			orderA, err := state.GetStateOrder()
 			if err != nil {
 				return err
 			}
-			tombstoneMap[t.RequestID] = newT
+			orderB, err := prevState.GetStateOrder()
+			if err != nil {
+				return err
+			}
+
+			// If the new state found is the lastest, then we replace the tombstone state in the map
+			if orderA > orderB {
+				discovered[requestID] = state
+			}
 		}
 		return nil
 	})
@@ -172,12 +182,38 @@ func (m *TombstoneManager) GetAllDeleteRequestsForUser(ctx context.Context) ([]*
 		return nil, err
 	}
 
-	deletionRequests := []*Tombstone{}
-	for _, t := range tombstoneMap {
-		deletionRequests = append(deletionRequests, t)
+	// Since tombstones are immutable, all tombstones already existing in the index can just be copied.
+	for _, t := range prevLoadedTombstones {
+		if state, ok := discovered[t.RequestID]; ok && state == t.State {
+			out = append(out, t)
+			delete(discovered, t.RequestID)
+		}
 	}
 
-	return deletionRequests, nil
+	// Remaining tombstones are new ones and we have to fetch them.
+	for id, state := range discovered {
+		filename := getTombstoneFileName(id, state)
+		t, err := m.ReadTombstoneFile(ctx, path.Join(TombstonePath, filename))
+		if errors.Is(err, ErrTombstoneNotFound) {
+			// This could happen if the series deletion cleaner removes the tombstone or the user cancels it between
+			// the "list objects" and now
+			level.Warn(m.logger).Log("msg", "skipped missing tombstone file when loading all the tombstones", "requestID", id, "state", string(state))
+			continue
+		}
+		if errors.Is(err, ErrTombstoneDecode) {
+			level.Error(m.logger).Log("msg", "skipped corrupted tombstone file when loading all the tombstones", "requestID", id, "state", state, "err", err)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		out = append(out, t)
+
+	}
+
+	return out, nil
+
 }
 
 func (m *TombstoneManager) getLatestTombstateByState(a *Tombstone, b *Tombstone) (*Tombstone, error) {
@@ -329,6 +365,10 @@ func (t *Tombstone) IsOverlappingInterval(minT int64, maxT int64) bool {
 
 func (t *Tombstone) GetCreateTime() time.Time {
 	return time.Unix(t.RequestCreatedAt/1000, 0)
+}
+
+func (t *Tombstone) GetStateTime() time.Time {
+	return time.Unix(t.StateCreatedAt/1000, 0)
 }
 
 func getTombstoneFileName(requestID string, state BlockDeleteRequestState) string {

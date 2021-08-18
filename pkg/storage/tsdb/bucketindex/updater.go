@@ -17,6 +17,7 @@ import (
 	"github.com/thanos-io/thanos/pkg/runutil"
 
 	"github.com/cortexproject/cortex/pkg/storage/bucket"
+	cortex_tsdb "github.com/cortexproject/cortex/pkg/storage/tsdb"
 	util_log "github.com/cortexproject/cortex/pkg/util/log"
 )
 
@@ -25,18 +26,36 @@ var (
 	ErrBlockMetaCorrupted         = block.ErrorSyncMetaCorrupted
 	ErrBlockDeletionMarkNotFound  = errors.New("block deletion mark not found")
 	ErrBlockDeletionMarkCorrupted = errors.New("block deletion mark corrupted")
+	ErrTombstoneNotFound          = errors.New("Tombstone file not found")
+	ErrTombstoneCorrupted         = errors.New("Tombstone file corrupted")
 )
 
 // Updater is responsible to generate an update in-memory bucket index.
 type Updater struct {
-	bkt    objstore.InstrumentedBucket
-	logger log.Logger
+	bkt                   objstore.InstrumentedBucket
+	blocksDeletionDelay   time.Duration
+	blocksCleanupInterval time.Duration
+	bktCfg                cortex_tsdb.BucketStoreConfig
+	tManager              *cortex_tsdb.TombstoneManager
+	logger                log.Logger
 }
 
-func NewUpdater(bkt objstore.Bucket, userID string, cfgProvider bucket.TenantConfigProvider, logger log.Logger) *Updater {
+func NewUpdater(
+	bkt objstore.Bucket,
+	userID string,
+	cfgProvider bucket.TenantConfigProvider,
+	deletionDelay time.Duration,
+	cleanupInterval time.Duration,
+	bktCfg cortex_tsdb.BucketStoreConfig,
+	logger log.Logger) *Updater {
+
 	return &Updater{
-		bkt:    bucket.NewUserBucketClient(userID, bkt, cfgProvider),
-		logger: util_log.WithUserID(userID, logger),
+		bkt:                   bucket.NewUserBucketClient(userID, bkt, cfgProvider),
+		blocksDeletionDelay:   deletionDelay,
+		blocksCleanupInterval: cleanupInterval,
+		bktCfg:                bktCfg,
+		tManager:              cortex_tsdb.NewTombstoneManager(bkt, userID, cfgProvider, logger),
+		logger:                util_log.WithUserID(userID, logger),
 	}
 }
 
@@ -45,11 +64,13 @@ func NewUpdater(bkt objstore.Bucket, userID string, cfgProvider bucket.TenantCon
 func (w *Updater) UpdateIndex(ctx context.Context, old *Index) (*Index, map[ulid.ULID]error, error) {
 	var oldBlocks []*Block
 	var oldBlockDeletionMarks []*BlockDeletionMark
+	var oldTombstones []*cortex_tsdb.Tombstone
 
 	// Read the old index, if provided.
 	if old != nil {
 		oldBlocks = old.Blocks
 		oldBlockDeletionMarks = old.BlockDeletionMarks
+		oldTombstones = old.Tombstones
 	}
 
 	blocks, partials, err := w.updateBlocks(ctx, oldBlocks)
@@ -62,10 +83,16 @@ func (w *Updater) UpdateIndex(ctx context.Context, old *Index) (*Index, map[ulid
 		return nil, nil, err
 	}
 
+	tombstones, err := w.updateSeriesDeletionTombstones(ctx, oldTombstones)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	return &Index{
 		Version:            IndexVersion1,
 		Blocks:             blocks,
 		BlockDeletionMarks: blockDeletionMarks,
+		Tombstones:         tombstones,
 		UpdatedAt:          time.Now().Unix(),
 	}, partials, nil
 }
@@ -222,4 +249,40 @@ func (w *Updater) updateBlockDeletionMarkIndexEntry(ctx context.Context, id ulid
 	}
 
 	return BlockDeletionMarkFromThanosMarker(&m), nil
+}
+
+func (w *Updater) updateSeriesDeletionTombstones(ctx context.Context, oldTombstones []*cortex_tsdb.Tombstone) ([]*cortex_tsdb.Tombstone, error) {
+	out := make([]*cortex_tsdb.Tombstone, 0, len(oldTombstones))
+	tombstones, err := w.tManager.GetAllDeleteRequestsForUser(ctx, oldTombstones)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, t := range tombstones {
+		if w.isTombstoneForFiltering(t) {
+			out = append(out, t)
+		}
+	}
+
+	return out, nil
+
+}
+
+// TODO move this function to the tombstones.go file
+func (w *Updater) isTombstoneForFiltering(t *cortex_tsdb.Tombstone) bool {
+	if t.State == cortex_tsdb.StatePending {
+		return true
+	}
+
+	// Once the tombstone has been processed for permanent deletions, the data has been rewritten and
+	// the old block have been marked for deletion.
+	// The tombstones need to be used for query time filtering until we can guarantee that the queriers
+	// have picked up the new blocks and no longer will query any of the deleted blocks.
+	// This time should be enough to guarantee that the new blocks will be queried:
+	filterTimeAfterProcessed := w.bktCfg.SyncInterval + w.blocksDeletionDelay + w.blocksCleanupInterval
+	if t.State == cortex_tsdb.StateProcessed && time.Since(t.GetStateTime()) < filterTimeAfterProcessed {
+		return true
+	}
+
+	return false
 }

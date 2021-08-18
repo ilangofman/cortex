@@ -16,6 +16,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/thanos-io/thanos/pkg/block"
@@ -27,6 +28,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	grpc_metadata "google.golang.org/grpc/metadata"
 
+	"github.com/cortexproject/cortex/pkg/chunk/purger"
 	"github.com/cortexproject/cortex/pkg/cortexpb"
 	"github.com/cortexproject/cortex/pkg/querier/series"
 	"github.com/cortexproject/cortex/pkg/querier/stats"
@@ -76,6 +78,9 @@ type BlocksFinder interface {
 	// GetBlocks returns known blocks for userID containing samples within the range minT
 	// and maxT (milliseconds, both included). Returned blocks are sorted by MaxTime descending.
 	GetBlocks(ctx context.Context, userID string, minT, maxT int64) (bucketindex.Blocks, map[ulid.ULID]*bucketindex.BlockDeletionMark, error)
+
+	// GetTombstones returns all the tombstones that are currently required for filtering deleted series.
+	GetTombstones(ctx context.Context, userID string, minT, maxT int64) (*purger.TombstonesSet, error)
 }
 
 // BlocksStoreClient is the interface that should be implemented by any client used
@@ -415,8 +420,8 @@ func (q *blocksStoreQuerier) selectSorted(sp *storage.SelectHints, matchers ...*
 
 		maxChunksLimit  = q.limits.MaxChunksPerQueryFromStore(q.userID)
 		leftChunksLimit = maxChunksLimit
-
-		resultMtx sync.Mutex
+		tombstoneSet    *purger.TombstonesSet
+		resultMtx       sync.Mutex
 	)
 
 	queryFunc := func(clients map[BlocksStoreClient][]ulid.ULID, minT, maxT int64) ([]ulid.ULID, error) {
@@ -447,11 +452,21 @@ func (q *blocksStoreQuerier) selectSorted(sp *storage.SelectHints, matchers ...*
 
 	if len(resSeriesSets) == 0 {
 		storage.EmptySeriesSet()
+	} else {
+		tombstoneSet, err = q.finder.GetTombstones(spanCtx, q.userID, minT, maxT)
+		if err != nil {
+			return storage.ErrSeriesSet(err)
+		}
 	}
 
-	return series.NewSeriesSetWithWarnings(
-		storage.NewMergeSeriesSet(resSeriesSets, storage.ChainedSeriesMerge),
-		resWarnings)
+	seriesSet := storage.NewMergeSeriesSet(resSeriesSets, storage.ChainedSeriesMerge)
+
+	if tombstoneSet != nil && tombstoneSet.Len() != 0 {
+		seriesSet = series.NewDeletedSeriesSet(seriesSet, tombstoneSet, model.Interval{Start: model.Time(minT), End: model.Time(maxT)})
+	}
+
+	return series.NewSeriesSetWithWarnings(seriesSet, resWarnings)
+
 }
 
 func (q *blocksStoreQuerier) queryWithConsistencyCheck(ctx context.Context, logger log.Logger, minT, maxT int64,

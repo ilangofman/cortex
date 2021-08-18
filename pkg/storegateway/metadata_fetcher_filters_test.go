@@ -20,6 +20,7 @@ import (
 	"github.com/thanos-io/thanos/pkg/objstore"
 
 	"github.com/cortexproject/cortex/pkg/storage/bucket"
+	cortex_tsdb "github.com/cortexproject/cortex/pkg/storage/tsdb"
 	"github.com/cortexproject/cortex/pkg/storage/tsdb/bucketindex"
 	cortex_testutil "github.com/cortexproject/cortex/pkg/storage/tsdb/testutil"
 )
@@ -68,7 +69,7 @@ func testIgnoreDeletionMarkFilter(t *testing.T, bucketIndexEnabled bool) {
 	if bucketIndexEnabled {
 		var err error
 
-		u := bucketindex.NewUpdater(bkt, userID, nil, logger)
+		u := bucketindex.NewUpdater(bkt, userID, nil, time.Minute, time.Minute, cortex_tsdb.BucketStoreConfig{}, logger)
 		idx, _, err = u.UpdateIndex(ctx, nil)
 		require.NoError(t, err)
 		require.NoError(t, bucketindex.WriteIndex(ctx, bkt, userID, nil, idx))

@@ -222,7 +222,7 @@ func TestGetAllTombstones(t *testing.T) {
 		require.NoError(t, tManager.WriteTombstoneFile(ctx, ts))
 	}
 
-	tombstonesOutput, err := tManager.GetAllDeleteRequestsForUser(ctx)
+	tombstonesOutput, err := tManager.GetAllDeleteRequestsForUser(ctx, nil)
 	require.NoError(t, err)
 
 	outputMap := make(map[string]BlockDeleteRequestState)
@@ -265,6 +265,12 @@ func TestTombstoneReadWithInvalidFileName(t *testing.T) {
 		tInvalidPath := username + "/tombstones/" + requestID + ".json." + string(StatePending)
 		_, err := tManager.ReadTombstoneFile(ctx, tInvalidPath)
 		require.ErrorIs(t, err, ErrInvalidDeletionRequestState)
+	}
+
+	{
+		tNotExists := username + "/tombstones/" + requestID + "." + string(StatePending) + ".json"
+		_, err := tManager.ReadTombstoneFile(ctx, tNotExists)
+		require.ErrorIs(t, err, ErrTombstoneNotFound)
 	}
 
 }
