@@ -370,6 +370,13 @@ func (t *Tombstone) GetStateTime() time.Time {
 	return time.Unix(t.StateCreatedAt/1000, 0)
 }
 
+func (t *Tombstone) GetCacheGenNumber() int64 {
+	if t.State == StateCancelled {
+		return t.StateCreatedAt / 1000
+	}
+	return t.RequestCreatedAt / 1000
+}
+
 func getTombstoneFileName(requestID string, state BlockDeleteRequestState) string {
 	return requestID + "." + string(state) + ".json"
 }

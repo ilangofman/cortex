@@ -199,7 +199,7 @@ func NewBlocksStoreQueryableFromConfig(querierCfg Config, gatewayCfg storegatewa
 			},
 			MaxStalePeriod:           storageCfg.BucketStore.BucketIndex.MaxStalePeriod,
 			IgnoreDeletionMarksDelay: storageCfg.BucketStore.IgnoreDeletionMarksDelay,
-		}, bucketClient, limits, logger, reg)
+		}, bucketClient, limits, logger, prometheus.WrapRegistererWith(prometheus.Labels{"component": "querier"}, reg))
 	} else {
 		finder = NewBucketScanBlocksFinder(BucketScanBlocksFinderConfig{
 			ScanInterval:             storageCfg.BucketStore.SyncInterval,

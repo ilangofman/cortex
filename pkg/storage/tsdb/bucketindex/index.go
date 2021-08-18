@@ -41,6 +41,9 @@ type Index struct {
 	// List of tombstones that are required for query time filtering of deleted series.
 	Tombstones SeriesDeletionTombstones `json:"series_deletion_tombstones"`
 
+	// the cache generation number used for invalidating the cache when new tombstones are created or cancelled
+	ResultsCacheGenNumber int64 `json:"results_cache_generation_number"`
+
 	// UpdatedAt is a unix timestamp (seconds precision) of when the index has been updated
 	// (written in the storage) the last time.
 	UpdatedAt int64 `json:"updated_at"`

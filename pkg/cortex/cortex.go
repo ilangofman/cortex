@@ -310,25 +310,27 @@ type Cortex struct {
 	ServiceMap    map[string]services.Service
 	ModuleManager *modules.Manager
 
-	API                      *api.API
-	Server                   *server.Server
-	Ring                     *ring.Ring
-	TenantLimits             validation.TenantLimits
-	Overrides                *validation.Overrides
-	Distributor              *distributor.Distributor
-	Ingester                 *ingester.Ingester
-	Flusher                  *flusher.Flusher
-	Store                    chunk.Store
-	DeletesStore             *purger.DeleteStore
-	Frontend                 *frontendv1.Frontend
-	TableManager             *chunk.TableManager
-	RuntimeConfig            *runtimeconfig.Manager
-	Purger                   *purger.Purger
-	TombstonesLoader         *purger.TombstonesLoader
-	QuerierQueryable         prom_storage.SampleAndChunkQueryable
-	ExemplarQueryable        prom_storage.ExemplarQueryable
-	QuerierEngine            *promql.Engine
-	QueryFrontendTripperware queryrange.Tripperware
+	API                       *api.API
+	Server                    *server.Server
+	Ring                      *ring.Ring
+	TenantLimits              validation.TenantLimits
+	Overrides                 *validation.Overrides
+	Distributor               *distributor.Distributor
+	Ingester                  *ingester.Ingester
+	Flusher                   *flusher.Flusher
+	Store                     chunk.Store
+	DeletesStore              *purger.DeleteStore
+	Frontend                  *frontendv1.Frontend
+	TableManager              *chunk.TableManager
+	RuntimeConfig             *runtimeconfig.Manager
+	Purger                    *purger.Purger
+	TombstonesLoader          *purger.TombstonesLoader
+	QuerierQueryable          prom_storage.SampleAndChunkQueryable
+	ExemplarQueryable         prom_storage.ExemplarQueryable
+	QuerierEngine             *promql.Engine
+	QueryFrontendTripperware  queryrange.Tripperware
+	BucketIndexCacheNumLoader *queryrange.BucketIndexCacheNumLoader
+	CacheGenNumLoader         queryrange.CacheGenNumberLoader
 
 	Ruler        *ruler.Ruler
 	RulerStorage rulestore.RuleStore

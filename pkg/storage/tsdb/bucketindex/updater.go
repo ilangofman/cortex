@@ -83,17 +83,18 @@ func (w *Updater) UpdateIndex(ctx context.Context, old *Index) (*Index, map[ulid
 		return nil, nil, err
 	}
 
-	tombstones, err := w.updateSeriesDeletionTombstones(ctx, oldTombstones)
+	tombstones, resultsCacheGen, err := w.updateSeriesDeletionTombstones(ctx, oldTombstones)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	return &Index{
-		Version:            IndexVersion1,
-		Blocks:             blocks,
-		BlockDeletionMarks: blockDeletionMarks,
-		Tombstones:         tombstones,
-		UpdatedAt:          time.Now().Unix(),
+		Version:               IndexVersion1,
+		Blocks:                blocks,
+		BlockDeletionMarks:    blockDeletionMarks,
+		Tombstones:            tombstones,
+		ResultsCacheGenNumber: resultsCacheGen,
+		UpdatedAt:             time.Now().Unix(),
 	}, partials, nil
 }
 
@@ -251,20 +252,26 @@ func (w *Updater) updateBlockDeletionMarkIndexEntry(ctx context.Context, id ulid
 	return BlockDeletionMarkFromThanosMarker(&m), nil
 }
 
-func (w *Updater) updateSeriesDeletionTombstones(ctx context.Context, oldTombstones []*cortex_tsdb.Tombstone) ([]*cortex_tsdb.Tombstone, error) {
+func (w *Updater) updateSeriesDeletionTombstones(ctx context.Context, oldTombstones []*cortex_tsdb.Tombstone) ([]*cortex_tsdb.Tombstone, int64, error) {
+	var resultsCacheGen int64
 	out := make([]*cortex_tsdb.Tombstone, 0, len(oldTombstones))
 	tombstones, err := w.tManager.GetAllDeleteRequestsForUser(ctx, oldTombstones)
 	if err != nil {
-		return nil, err
+		return nil, resultsCacheGen, err
 	}
 
 	for _, t := range tombstones {
 		if w.isTombstoneForFiltering(t) {
 			out = append(out, t)
 		}
+
+		cacheGenNum := t.GetCacheGenNumber()
+		if w.isTombstoneForCacheGenNumber(t) && cacheGenNum > resultsCacheGen {
+			resultsCacheGen = cacheGenNum
+		}
 	}
 
-	return out, nil
+	return out, resultsCacheGen, nil
 
 }
 
@@ -282,6 +289,26 @@ func (w *Updater) isTombstoneForFiltering(t *cortex_tsdb.Tombstone) bool {
 	filterTimeAfterProcessed := w.bktCfg.SyncInterval + w.blocksDeletionDelay + w.blocksCleanupInterval
 	if t.State == cortex_tsdb.StateProcessed && time.Since(t.GetStateTime()) < filterTimeAfterProcessed {
 		return true
+	}
+
+	return false
+}
+
+// TODO move this function to the tombstones.go file
+func (w *Updater) isTombstoneForCacheGenNumber(t *cortex_tsdb.Tombstone) bool {
+	// The cache generation number is used for invalidating the query results cache.
+	// It is invalidated when a new request is created or a previous has been cancelled.
+	// However, it is only safe to invalidate the cache when all the queriers have the all the updated tombstones.
+	// This can only be guaranteed after the bucket index staleness period has passed after the tombstone is created/cancelled.
+
+	if t.State == cortex_tsdb.StateCancelled {
+		if w.bktCfg.BucketIndex.MaxStalePeriod < time.Since(t.GetStateTime()) {
+			return true
+		}
+	} else {
+		if w.bktCfg.BucketIndex.MaxStalePeriod < time.Since(t.GetCreateTime()) {
+			return true
+		}
 	}
 
 	return false

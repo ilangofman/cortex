@@ -260,7 +260,7 @@ func (tl *TombstonesLoader) GetStoreCacheGenNumber(tenantIDs []string) string {
 }
 
 // GetResultsCacheGenNumber returns results cache gen number for a user
-func (tl *TombstonesLoader) GetResultsCacheGenNumber(tenantIDs []string) string {
+func (tl *TombstonesLoader) GetResultsCacheGenNumber(_ context.Context, tenantIDs []string) string {
 	return tl.getCacheGenNumbersPerTenants(tenantIDs).results
 }
 
@@ -344,6 +344,13 @@ func (tl *TombstonesLoader) getCacheGenNumbers(userID string) *cacheGenNumbers {
 
 	tl.cacheGenNumbers[userID] = genNumbers
 	return genNumbers
+}
+
+func (tl *TombstonesLoader) ShouldCompareWithQueriersResponse() bool {
+	// Using the chunks storage, the query results cache compares the frontend cache gen num to each of
+	// cache gen nums received from the queriers. If they match, then the response is cached, otherwise
+	// the response is not cached.
+	return true
 }
 
 // GetDeletedIntervals returns non-overlapping, sorted  deleted intervals.
