@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"path"
+	"strconv"
 	"testing"
 	"time"
 
@@ -287,6 +288,164 @@ func TestUpdater_UpdateIndex_ShouldNotUploadDuplicateTombstones(t *testing.T) {
 		[]*metadata.DeletionMark{},
 		[]*cortex_tsdb.Tombstone{tombstone1, tombstone2})
 	assert.Empty(t, partials)
+}
+
+// TODO move to the tombstones test file
+func TestUpdater_UpdateIndex_IncludeTombstoneInCacheGenNumUpdate(t *testing.T) {
+	const userID = "user"
+	const requestID = "requestID"
+
+	bkt, _ := testutil.PrepareFilesystemBucket(t)
+
+	bktIndexCfg := cortex_tsdb.BucketIndexConfig{
+		MaxStalePeriod: time.Minute * 30,
+	}
+
+	bktStoreCfg := cortex_tsdb.BucketStoreConfig{
+		SyncInterval: time.Minute,
+		BucketIndex:  bktIndexCfg,
+	}
+
+	w := NewUpdater(bkt, userID, nil, blockDeletionDelay, blocksCleanupInterval, bktStoreCfg, log.NewNopLogger())
+
+	for name, tc := range map[string]struct {
+		createTime       time.Time
+		stateTime        time.Time
+		state            cortex_tsdb.BlockDeleteRequestState
+		isForCacheGenNum bool
+	}{
+		"tombstone was just created, no guarantee all queriers have loaded it": {
+			createTime:       time.Now(),
+			stateTime:        time.Now(),
+			state:            cortex_tsdb.StatePending,
+			isForCacheGenNum: false,
+		},
+		"tombstone was created past the bucket index stale period": {
+			createTime:       time.Now().Add(-31 * time.Minute),
+			stateTime:        time.Now().Add(-31 * time.Minute),
+			state:            cortex_tsdb.StatePending,
+			isForCacheGenNum: true,
+		},
+		"tombstone processed and the bucket index stale period has passed": {
+			createTime:       time.Now().Add(-31 * time.Minute),
+			stateTime:        time.Now().Add(-5 * time.Minute),
+			state:            cortex_tsdb.StateProcessed,
+			isForCacheGenNum: true,
+		},
+		"tombstone processed but bucket index stale period not over": {
+			createTime:       time.Now().Add(-29 * time.Minute),
+			stateTime:        time.Now().Add(-5 * time.Minute),
+			state:            cortex_tsdb.StateProcessed,
+			isForCacheGenNum: false,
+		},
+		"tombstone cancelled but bucket index stale period not over": {
+			// for cancelled tombstones, the time is checked from when it was cancelled not created
+			createTime:       time.Now().Add(-100 * time.Minute),
+			stateTime:        time.Now().Add(-29 * time.Minute),
+			state:            cortex_tsdb.StateCancelled,
+			isForCacheGenNum: false,
+		},
+
+		"tombstone cancelled and the bucket index stale period has passed": {
+			// for cancelled tombstones, the time is checked from when it was cancelled not created
+			createTime:       time.Now().Add(-100 * time.Minute),
+			stateTime:        time.Now().Add(-31 * time.Minute),
+			state:            cortex_tsdb.StateCancelled,
+			isForCacheGenNum: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tombstone := cortex_tsdb.NewTombstone(userID, tc.createTime.Unix()*1000, tc.stateTime.Unix()*1000, 0, 0, nil, "-", tc.state)
+			include := w.isTombstoneForCacheGenNumber(tombstone)
+			require.Equal(t, tc.isForCacheGenNum, include)
+		})
+	}
+}
+
+func TestUpdater_UpdateIndex_ResultsCacheGenNumber(t *testing.T) {
+	const userID = "user"
+	const requestID = "requestID"
+
+	stalePeriod := 30 * time.Minute
+	bktIndexCfg := cortex_tsdb.BucketIndexConfig{
+		MaxStalePeriod: stalePeriod,
+	}
+
+	bktStoreCfg := cortex_tsdb.BucketStoreConfig{
+		SyncInterval: time.Minute,
+		BucketIndex:  bktIndexCfg,
+	}
+
+	type tombstoneInfo struct {
+		CreateTime time.Time
+		StateTime  time.Time
+		State      cortex_tsdb.BlockDeleteRequestState
+	}
+
+	// The results cache generation number is calculated as follows:
+	// The maximum timestamp of the tombstones that are guaranteed to have been loaded into the queriers.
+	// The timestamp of the tombstones are when the request was created for pending/processed tombstones.
+	// For the cancelled tombstones, we use the state creation time.
+	// The tombstones are only guaranteed to be loaded into the queriers if the bucket index staleness period has passed since the creation/cancellation
+	// of the series delete request. This is done to ensure that the query results cache is invalidated when it is guaranteed that all the queriers
+	// have loaded the new tombstones.
+
+	for name, tc := range map[string]struct {
+		tombstoneInfo        []tombstoneInfo
+		excpectedCacheGenNum int64
+	}{
+		"No tombstones exist in the bucket": {
+			tombstoneInfo:        nil,
+			excpectedCacheGenNum: 0,
+		},
+		"tombstone exist but are not included in the cache gen number update": {
+			tombstoneInfo: []tombstoneInfo{
+				{CreateTime: time.Now(), StateTime: time.Now(), State: cortex_tsdb.StatePending},
+				{CreateTime: time.Now().Add(-25 * time.Minute), StateTime: time.Now().Add(-6 * time.Minute), State: cortex_tsdb.StateProcessed},
+			},
+			excpectedCacheGenNum: 0,
+		},
+		"multiple tombstone exist and the bucket index staleness period has passed for some": {
+			tombstoneInfo: []tombstoneInfo{
+				{CreateTime: time.Now(), StateTime: time.Now(), State: cortex_tsdb.StatePending},
+				{CreateTime: time.Now().Add(-29 * time.Minute), StateTime: time.Now().Add(-29 * time.Minute), State: cortex_tsdb.StatePending},
+				{CreateTime: time.Now().Add(-32 * time.Minute), StateTime: time.Now().Add(-32 * time.Minute), State: cortex_tsdb.StatePending},
+				{CreateTime: time.Now().Add(-42 * time.Minute), StateTime: time.Now().Add(-31 * time.Minute), State: cortex_tsdb.StateProcessed},
+				{CreateTime: time.Now().Add(-42 * time.Minute), StateTime: time.Now().Add(-26 * time.Minute), State: cortex_tsdb.StateProcessed},
+			},
+			excpectedCacheGenNum: time.Now().Add(-32 * time.Minute).Unix(),
+		},
+		"One cancelled tombstone but the staleness period has not passed": {
+			tombstoneInfo: []tombstoneInfo{
+				{CreateTime: time.Now(), StateTime: time.Now(), State: cortex_tsdb.StatePending},
+				{CreateTime: time.Now().Add(-100 * time.Minute), StateTime: time.Now().Add(-29 * time.Minute), State: cortex_tsdb.StateCancelled},
+			},
+			excpectedCacheGenNum: 0,
+		},
+		"Tombstone was cancelled and the bucket index staleness period has passed since it was cancelled": {
+			tombstoneInfo: []tombstoneInfo{
+				{CreateTime: time.Now(), StateTime: time.Now(), State: cortex_tsdb.StatePending},
+				{CreateTime: time.Now().Add(-42 * time.Minute), StateTime: time.Now().Add(-31 * time.Minute), State: cortex_tsdb.StateProcessed},
+				{CreateTime: time.Now().Add(-42 * time.Minute), StateTime: time.Now().Add(-26 * time.Minute), State: cortex_tsdb.StateProcessed},
+				{CreateTime: time.Now().Add(-100 * time.Minute), StateTime: time.Now().Add(-31 * time.Minute), State: cortex_tsdb.StateCancelled},
+			},
+			excpectedCacheGenNum: time.Now().Add(-31 * time.Minute).Unix(),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			bkt, _ := testutil.PrepareFilesystemBucket(t)
+			w := NewUpdater(bkt, userID, nil, blockDeletionDelay, blocksCleanupInterval, bktStoreCfg, log.NewNopLogger())
+
+			for i, ts := range tc.tombstoneInfo {
+				testutil.MockTombstone(t, bkt, userID, ts.CreateTime.Unix()*1000, ts.StateTime.Unix()*1000, 0, 0, nil, strconv.Itoa(i), ts.State)
+			}
+
+			_, cacheGenNum, err := w.updateSeriesDeletionTombstones(ctx, nil)
+			require.NoError(t, err)
+			require.Equal(t, tc.excpectedCacheGenNum, cacheGenNum)
+		})
+	}
 }
 
 func TestUpdater_UpdateIndex_NoTenantInTheBucket(t *testing.T) {
