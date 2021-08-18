@@ -38,7 +38,7 @@ type Index struct {
 	// List of block deletion marks.
 	BlockDeletionMarks BlockDeletionMarks `json:"block_deletion_marks"`
 
-	// List of tombstones that require query time filtering for deleted series
+	// List of tombstones that are required for query time filtering of deleted series.
 	Tombstones SeriesDeletionTombstones `json:"series_deletion_tombstones"`
 
 	// the cache generation number used for invalidating the cache when new tombstones are created or cancelled

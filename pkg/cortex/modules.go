@@ -519,7 +519,7 @@ func (t *Cortex) initChunkStore() (serv services.Service, err error) {
 }
 
 func (t *Cortex) initDeleteRequestsStore() (serv services.Service, err error) {
-	if t.Cfg.Storage.Engine != storage.StorageEngineChunks || !t.Cfg.PurgerConfig.Enable {
+	if t.Cfg.Storage.Engine != storage.StorageEngineChunks || !t.Cfg.PurgerConfig.EnableSeriesDeletion {
 		// until we need to explicitly enable delete series support we need to do create TombstonesLoader without DeleteStore which acts as noop
 		t.TombstonesLoader = purger.NewTombstonesLoader(nil, nil)
 		return
@@ -656,7 +656,7 @@ func (t *Cortex) initTableManager() (services.Service, error) {
 	util_log.CheckFatal("initializing bucket client", err)
 
 	var extraTables []chunk.ExtraTables
-	if t.Cfg.PurgerConfig.Enable {
+	if t.Cfg.PurgerConfig.EnableSeriesDeletion {
 		reg := prometheus.WrapRegistererWith(
 			prometheus.Labels{"component": "table-manager-" + DeleteRequestsStore}, prometheus.DefaultRegisterer)
 
@@ -822,7 +822,7 @@ func (t *Cortex) initMemberlistKV() (services.Service, error) {
 }
 
 func (t *Cortex) initChunksPurger() (services.Service, error) {
-	if t.Cfg.Storage.Engine != storage.StorageEngineChunks || !t.Cfg.PurgerConfig.Enable {
+	if t.Cfg.Storage.Engine != storage.StorageEngineChunks || !t.Cfg.PurgerConfig.EnableSeriesDeletion {
 		return nil, nil
 	}
 
@@ -852,7 +852,7 @@ func (t *Cortex) initBlocksPurger() (services.Service, error) {
 		return nil, err
 	}
 
-	t.API.RegisterBlocksPurger(blockPurger, t.Cfg.PurgerConfig.Enable)
+	t.API.RegisterBlocksPurger(blockPurger, t.Cfg.PurgerConfig.EnableSeriesDeletion)
 	return nil, nil
 }
 

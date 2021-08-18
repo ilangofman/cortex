@@ -113,7 +113,7 @@ func TestApiStatusCodes(t *testing.T) {
 			"error from seriesset": errorTestQueryable{q: errorTestQuerier{s: errorTestSeriesSet{err: tc.err}}},
 		} {
 			t.Run(fmt.Sprintf("%s/%d", k, ix), func(t *testing.T) {
-				r := createPrometheusAPI(errorTranslateQueryable{q: q})
+				r := createPrometheusAPI(NewErrorTranslateSampleAndChunkQueryable(q))
 				rec := httptest.NewRecorder()
 
 				req := httptest.NewRequest("GET", "/api/v1/query?query=up", nil)
@@ -192,7 +192,7 @@ func (t errorTestQuerier) LabelValues(name string, matchers ...*labels.Matcher) 
 	return nil, nil, t.err
 }
 
-func (t errorTestQuerier) LabelNames() ([]string, storage.Warnings, error) {
+func (t errorTestQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
 	return nil, nil, t.err
 }
 
