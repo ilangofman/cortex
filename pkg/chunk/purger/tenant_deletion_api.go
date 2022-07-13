@@ -26,7 +26,7 @@ type TenantDeletionAPI struct {
 }
 
 func NewTenantDeletionAPI(storageCfg cortex_tsdb.BlocksStorageConfig, cfgProvider bucket.TenantConfigProvider, logger log.Logger, reg prometheus.Registerer) (*TenantDeletionAPI, error) {
-	bucketClient, err := createBucketClient(storageCfg, logger, reg)
+	bucketClient, err := createBucketClient(storageCfg, logger, "tenant-deletion-purger", reg)
 	if err != nil {
 		return nil, err
 	}
@@ -118,8 +118,8 @@ func (api *TenantDeletionAPI) isBlocksForUserDeleted(ctx context.Context, userID
 	return true, nil
 }
 
-func createBucketClient(cfg cortex_tsdb.BlocksStorageConfig, logger log.Logger, reg prometheus.Registerer) (objstore.Bucket, error) {
-	bucketClient, err := bucket.NewClient(context.Background(), cfg.Bucket, "purger", logger, reg)
+func createBucketClient(cfg cortex_tsdb.BlocksStorageConfig, logger log.Logger, name string, reg prometheus.Registerer) (objstore.Bucket, error) {
+	bucketClient, err := bucket.NewClient(context.Background(), cfg.Bucket, name, logger, reg)
 	if err != nil {
 		return nil, errors.Wrap(err, "create bucket client")
 	}

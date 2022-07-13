@@ -80,6 +80,7 @@ const (
 	StoreGateway             string = "store-gateway"
 	MemberlistKV             string = "memberlist-kv"
 	ChunksPurger             string = "chunks-purger"
+	BlocksPurger             string = "blocks-purger"
 	TenantDeletion           string = "tenant-deletion"
 	Purger                   string = "purger"
 	QueryScheduler           string = "query-scheduler"
@@ -479,7 +480,7 @@ func (t *Cortex) initChunkStore() (serv services.Service, err error) {
 }
 
 func (t *Cortex) initDeleteRequestsStore() (serv services.Service, err error) {
-	if t.Cfg.Storage.Engine != storage.StorageEngineChunks || !t.Cfg.PurgerConfig.Enable {
+	if t.Cfg.Storage.Engine != storage.StorageEngineChunks || !t.Cfg.PurgerConfig.EnableSeriesDeletion {
 		// until we need to explicitly enable delete series support we need to do create TombstonesLoader without DeleteStore which acts as noop
 		t.TombstonesLoader = purger.NewTombstonesLoader(nil, nil)
 
@@ -617,7 +618,7 @@ func (t *Cortex) initTableManager() (services.Service, error) {
 	util_log.CheckFatal("initializing bucket client", err)
 
 	var extraTables []chunk.ExtraTables
-	if t.Cfg.PurgerConfig.Enable {
+	if t.Cfg.PurgerConfig.EnableSeriesDeletion {
 		reg := prometheus.WrapRegistererWith(
 			prometheus.Labels{"component": "table-manager-" + DeleteRequestsStore}, prometheus.DefaultRegisterer)
 
@@ -792,7 +793,7 @@ func (t *Cortex) initMemberlistKV() (services.Service, error) {
 }
 
 func (t *Cortex) initChunksPurger() (services.Service, error) {
-	if t.Cfg.Storage.Engine != storage.StorageEngineChunks || !t.Cfg.PurgerConfig.Enable {
+	if t.Cfg.Storage.Engine != storage.StorageEngineChunks || !t.Cfg.PurgerConfig.EnableSeriesDeletion {
 		return nil, nil
 	}
 
@@ -823,6 +824,21 @@ func (t *Cortex) initTenantDeletionAPI() (services.Service, error) {
 	}
 
 	t.API.RegisterTenantDeletion(tenantDeletionAPI)
+	return nil, nil
+}
+
+func (t *Cortex) initBlocksPurger() (services.Service, error) {
+	if t.Cfg.Storage.Engine != storage.StorageEngineBlocks || !t.Cfg.PurgerConfig.EnableSeriesDeletion {
+		return nil, nil
+	}
+
+	// t.RulerStorage can be nil when running in single-binary mode, and rule storage is not configured.
+	blockPurger, err := purger.NewBlocksPurgerAPI(t.Cfg.BlocksStorage, t.Overrides, util_log.Logger, prometheus.DefaultRegisterer, t.Cfg.PurgerConfig.DeleteRequestCancelPeriod)
+	if err != nil {
+		return nil, err
+	}
+
+	t.API.RegisterBlocksPurger(blockPurger)
 	return nil, nil
 }
 
@@ -869,6 +885,7 @@ func (t *Cortex) setupModuleManager() error {
 	mm.RegisterModule(StoreGateway, t.initStoreGateway)
 	mm.RegisterModule(ChunksPurger, t.initChunksPurger, modules.UserInvisibleModule)
 	mm.RegisterModule(TenantDeletion, t.initTenantDeletionAPI, modules.UserInvisibleModule)
+	mm.RegisterModule(BlocksPurger, t.initBlocksPurger, modules.UserInvisibleModule)
 	mm.RegisterModule(Purger, nil)
 	mm.RegisterModule(QueryScheduler, t.initQueryScheduler)
 	mm.RegisterModule(TenantFederation, t.initTenantFederation, modules.UserInvisibleModule)
@@ -903,7 +920,8 @@ func (t *Cortex) setupModuleManager() error {
 		StoreGateway:             {API, Overrides, MemberlistKV},
 		ChunksPurger:             {Store, DeleteRequestsStore, API},
 		TenantDeletion:           {Store, API, Overrides},
-		Purger:                   {ChunksPurger, TenantDeletion},
+		BlocksPurger:             {Store, API, Overrides},
+		Purger:                   {ChunksPurger, TenantDeletion, BlocksPurger},
 		TenantFederation:         {Queryable},
 		All:                      {QueryFrontend, Querier, Ingester, Distributor, TableManager, Purger, StoreGateway, Ruler},
 	}

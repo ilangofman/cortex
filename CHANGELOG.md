@@ -1,7 +1,7 @@
 # Changelog
 
 ## master / unreleased
-
+* [FEATURE] Block Storage: Added Prometheus style API endpoints for series deletion. Needs to be enabled first by setting `--purger.enable` to `true`. This only handles the creating, getting and cancelling requests. Actual deletion and query time filtering will be part of future PRs. #4370
 
 ## 1.13.0 in progress
 * [CHANGE] Changed default for `-ingester.min-ready-duration` from 1 minute to 15 seconds. #4539
